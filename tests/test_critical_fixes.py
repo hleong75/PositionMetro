@@ -95,6 +95,58 @@ class TestMovingBlockFix:
             
         finally:
             await engine.stop()
+    
+    @pytest.mark.asyncio
+    async def test_moving_block_disabled_without_track_distance(self):
+        """Test that moving blocks are disabled (not using lat/lon) when track_distance unavailable."""
+        engine = HybridFusionEngine()
+        await engine.start()
+        
+        try:
+            # Create trains WITHOUT track_distance on same route
+            train1_state = TrainStateVector(
+                position=Position2D(latitude=48.8566, longitude=2.3522),
+                velocity=10.0,
+                acceleration=0.0,
+                bearing=0.0,
+                track_distance=None  # No track distance
+            )
+            train1 = TrainEntity(
+                train_id="TRAIN_001",
+                trip_id="TRIP_001",
+                route_id="RER_A",
+                initial_state=train1_state
+            )
+            
+            train2_state = TrainStateVector(
+                position=Position2D(latitude=48.8500, longitude=2.3500),
+                velocity=10.0,
+                acceleration=0.0,
+                bearing=0.0,
+                track_distance=None  # No track distance
+            )
+            train2 = TrainEntity(
+                train_id="TRAIN_002",
+                trip_id="TRIP_002",
+                route_id="RER_A",
+                initial_state=train2_state
+            )
+            
+            # Add trains to engine
+            engine._trains["TRAIN_001"] = train1
+            engine._trains["TRAIN_002"] = train2
+            
+            # Update moving blocks
+            engine._update_moving_blocks()
+            
+            # Both trains should have NO relationships (degraded mode)
+            assert train1.preceding_train is None
+            assert train1.following_train is None
+            assert train2.preceding_train is None
+            assert train2.following_train is None
+            
+        finally:
+            await engine.stop()
 
 
 class TestHarvesterTimingFix:
