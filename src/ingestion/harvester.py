@@ -162,9 +162,6 @@ class GTFSRTHarvester:
         Returns:
             True if connection successful, False otherwise.
         """
-        max_retries = self.MAX_RETRIES
-        base_delay = self.RETRY_DELAY
-        
         try:
             # Create new producer if needed
             if self._producer is None:
@@ -188,16 +185,16 @@ class GTFSRTHarvester:
                 "harvester_kafka_connection_failed",
                 error=str(e),
                 retry_attempt=retry_attempt,
-                max_retries=max_retries
+                max_retries=self.MAX_RETRIES
             )
             
             # Set producer to None on failure
             self._producer = None
             
             # Retry with exponential backoff if we haven't exceeded max retries
-            if retry_attempt < max_retries:
+            if retry_attempt < self.MAX_RETRIES:
                 # Exponential backoff: delay * (2 ^ retry_attempt)
-                delay = base_delay * (2 ** retry_attempt)
+                delay = self.RETRY_DELAY * (2 ** retry_attempt)
                 logger.info(
                     "harvester_kafka_retry_scheduled",
                     retry_attempt=retry_attempt + 1,
@@ -208,7 +205,7 @@ class GTFSRTHarvester:
             else:
                 logger.error(
                     "harvester_kafka_connection_exhausted",
-                    max_retries=max_retries,
+                    max_retries=self.MAX_RETRIES,
                     note="Will continue without Kafka publishing in degraded mode"
                 )
                 return False

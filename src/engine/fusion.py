@@ -272,13 +272,15 @@ class UnscentedKalmanFilter:
             diff = predicted_sigma_points[:, i] - self.state
             self.P += self.Wc[i] * np.outer(diff, diff)
             
-    def update(self, measurement: np.ndarray, apply_zupt: bool = False) -> None:
+    def update(self, measurement: Optional[np.ndarray], apply_zupt: bool = False) -> None:
         """
         Update step: correct prediction with measurement.
         
         Args:
             measurement: Measurement vector [lat, lon, velocity, acceleration, bearing].
+                        Can be None when apply_zupt is True.
             apply_zupt: Apply Zero Velocity Update (ZUPT) constraint for stopped trains.
+                       When True, measurement is not used.
         """
         n = len(self.state)
         
