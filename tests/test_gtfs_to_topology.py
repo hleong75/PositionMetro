@@ -8,10 +8,8 @@ the conversion logic.
 """
 
 import json
-import tempfile
 import zipfile
 from pathlib import Path
-from io import StringIO
 
 import pytest
 import pandas as pd

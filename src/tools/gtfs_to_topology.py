@@ -59,8 +59,8 @@ class GTFSTopologyConverter:
         """
         Load shapes.txt and trips.txt from GTFS ZIP file.
         
-        Uses pandas read_csv with chunking for memory efficiency on large files.
         Only loads required columns to minimize memory usage.
+        Uses efficient pandas data types for better memory efficiency.
         
         Raises:
             FileNotFoundError: If input ZIP file doesn't exist
@@ -127,26 +127,23 @@ class GTFSTopologyConverter:
         - Counting which route_id uses each shape_id most frequently
         - Selecting the most common route_id for shapes used by multiple routes
         
+        Uses efficient pandas groupby for better performance on large datasets.
+        
         Returns:
             Dictionary mapping shape_id to route_id
         """
         print("🔗 Associating shapes to routes...")
         
-        # Count route_id occurrences for each shape_id
+        # Use groupby for efficient processing of all shapes at once
+        # For each shape_id, count route_id occurrences and select most common
         shape_route_mapping: Dict[str, str] = {}
         
-        # Group by shape_id and count route_id occurrences
-        for shape_id in tqdm(self.trips_df['shape_id'].unique(), 
-                            desc="Processing shape-route associations"):
-            # Get all route_ids for this shape_id
-            routes_for_shape = self.trips_df[
-                self.trips_df['shape_id'] == shape_id
-            ]['route_id']
-            
-            # Count occurrences and select most frequent
-            route_counter = Counter(routes_for_shape)
+        grouped = self.trips_df.groupby('shape_id')['route_id']
+        
+        for shape_id, routes in tqdm(grouped, desc="Processing shape-route associations"):
+            # Count occurrences and select most frequent route
+            route_counter = Counter(routes)
             most_common_route = route_counter.most_common(1)[0][0]
-            
             shape_route_mapping[shape_id] = most_common_route
         
         print(f"  ✓ Mapped {len(shape_route_mapping):,} unique shapes to routes")
@@ -167,8 +164,8 @@ class GTFSTopologyConverter:
         Returns:
             List of [longitude, latitude] coordinate pairs
         """
-        # Sort by sequence number
-        shape_points = shape_points.sort_values('shape_pt_sequence')
+        # Create a copy and sort by sequence number to avoid modifying the input
+        shape_points = shape_points.copy().sort_values('shape_pt_sequence')
         
         # Extract coordinates as [lon, lat] pairs (GeoJSON format)
         points = shape_points[['shape_pt_lon', 'shape_pt_lat']].values.tolist()
