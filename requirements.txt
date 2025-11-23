@@ -1,5 +1,5 @@
 # Core Python dependencies
-python>=3.12
+# Requires Python 3.12+
 
 # Async and Performance
 asyncio
