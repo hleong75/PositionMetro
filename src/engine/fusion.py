@@ -272,14 +272,20 @@ class UnscentedKalmanFilter:
             diff = predicted_sigma_points[:, i] - self.state
             self.P += self.Wc[i] * np.outer(diff, diff)
             
-    def update(self, measurement: np.ndarray) -> None:
+    def update(self, measurement: np.ndarray, apply_zupt: bool = False) -> None:
         """
         Update step: correct prediction with measurement.
         
         Args:
             measurement: Measurement vector [lat, lon, velocity, acceleration, bearing].
+            apply_zupt: Apply Zero Velocity Update (ZUPT) constraint for stopped trains.
         """
         n = len(self.state)
+        
+        # Apply ZUPT if requested (train is stopped)
+        if apply_zupt:
+            self._apply_zupt()
+            return
         
         # Generate sigma points from predicted state
         sigma_points = self._generate_sigma_points()
@@ -310,6 +316,29 @@ class UnscentedKalmanFilter:
         
         # Update covariance
         self.P -= np.dot(K, np.dot(Pz, K.T))
+    
+    def _apply_zupt(self) -> None:
+        """
+        Apply Zero Velocity Update (ZUPT) constraint.
+        
+        When a train is stopped at a station, force velocity and acceleration to zero
+        and reduce their covariance to prevent the filter from drifting due to inertia.
+        This improves accuracy during station stops.
+        """
+        # Force velocity and acceleration to zero
+        self.state[2] = 0.0  # velocity
+        self.state[3] = 0.0  # acceleration
+        
+        # Drastically reduce covariance for velocity and acceleration
+        # This tells the filter we're very confident these values are zero
+        self.P[2, 2] = 0.001  # velocity variance
+        self.P[3, 3] = 0.001  # acceleration variance
+        
+        # Also reduce cross-covariances involving velocity and acceleration
+        self.P[2, :] *= 0.1
+        self.P[:, 2] *= 0.1
+        self.P[3, :] *= 0.1
+        self.P[:, 3] *= 0.1
         
     def _generate_sigma_points(self) -> np.ndarray:
         """Generate sigma points for UKF."""
@@ -574,17 +603,29 @@ class TrainEntity:
         """
         current_state = self.kalman.get_state_vector()
         
-        # Construct measurement vector
-        measurement = np.array([
-            position.latitude,
-            position.longitude,
-            velocity if velocity is not None else current_state.velocity,
-            0.0,  # Acceleration not directly measured
-            bearing if bearing is not None else current_state.bearing
-        ])
+        # Determine if train is stopped (for ZUPT application)
+        measured_velocity = velocity if velocity is not None else current_state.velocity
+        is_stopped = abs(measured_velocity) < 0.1  # Threshold for stopped train
         
-        # Update Kalman filter
-        self.kalman.update(measurement)
+        if is_stopped:
+            # Apply Zero Velocity Update (ZUPT) constraint
+            # This prevents filter drift when train is stopped at stations
+            self.kalman.update(None, apply_zupt=True)
+            logger.debug(
+                "train_zupt_applied",
+                train_id=self.train_id,
+                reason="measured_velocity near zero"
+            )
+        else:
+            # Normal Kalman filter update
+            measurement = np.array([
+                position.latitude,
+                position.longitude,
+                measured_velocity,
+                0.0,  # Acceleration not directly measured
+                bearing if bearing is not None else current_state.bearing
+            ])
+            self.kalman.update(measurement)
         
         # Update track distance and gradient if provided
         if track_distance is not None:

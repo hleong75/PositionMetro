@@ -10,6 +10,7 @@ from src.engine.fusion import (
     Position2D,
     TrainStateVector,
     TrainEntity,
+    TrainState,
     HybridFusionEngine,
     get_davis_coefficients_for_route_type,
     DavisCoefficients
@@ -178,8 +179,12 @@ class TestHarvesterTimingFix:
                 harvester._active = False
         
         # Create harvester with mocked methods
+        # Don't connect to Kafka to avoid delays from reconnection attempts
         harvester = GTFSRTHarvester()
-        await harvester.start()
+        harvester._session = Mock()  # Mock session to avoid real HTTP connection
+        harvester._producer = None  # No Kafka producer
+        harvester._own_producer = False  # Don't try to reconnect
+        harvester._active = True
         
         try:
             # Mock harvest_resource to simulate processing time
@@ -218,7 +223,7 @@ class TestHarvesterTimingFix:
             assert 0.9 < sleep_times[0] < 1.0  # Should be close to 0.95
                 
         finally:
-            await harvester.stop()
+            harvester._active = False  # Stop harvester
 
 
 class TestKafkaReconnection:
@@ -460,3 +465,126 @@ class TestDynamicDavisCoefficients:
         assert train.properties.davis.A == 3.5
         assert train.properties.davis.B == 0.02
         assert train.properties.davis.C == 0.0025
+
+
+class TestZeroVelocityUpdate:
+    """Test Zero Velocity Update (ZUPT) for stopped trains."""
+    
+    def test_zupt_applied_when_velocity_zero(self):
+        """Test that ZUPT is applied when measured velocity is zero."""
+        position = Position2D(latitude=48.8566, longitude=2.3522)
+        initial_state = TrainStateVector(
+            position=position,
+            velocity=5.0,  # Initially moving
+            acceleration=0.0,
+            bearing=90.0
+        )
+        
+        train = TrainEntity(
+            train_id="TRAIN_001",
+            trip_id="TRIP_001",
+            route_id="METRO_1",
+            initial_state=initial_state
+        )
+        
+        # Update with zero velocity (train stopped)
+        train.update_from_measurement(
+            position=position,
+            velocity=0.0,  # Stopped
+            bearing=90.0
+        )
+        
+        # Check that velocity and acceleration are constrained to zero
+        state = train.get_current_state()
+        assert abs(state.velocity) < 0.01  # Should be very close to zero
+        assert abs(state.acceleration) < 0.01  # Should be very close to zero
+    
+    def test_zupt_not_applied_when_moving(self):
+        """Test that ZUPT is not applied when train is moving."""
+        position = Position2D(latitude=48.8566, longitude=2.3522)
+        initial_state = TrainStateVector(
+            position=position,
+            velocity=5.0,
+            acceleration=0.0,
+            bearing=90.0
+        )
+        
+        train = TrainEntity(
+            train_id="TRAIN_001",
+            trip_id="TRIP_001",
+            route_id="METRO_1",
+            initial_state=initial_state
+        )
+        
+        # Update with non-zero velocity (train moving)
+        train.update_from_measurement(
+            position=Position2D(latitude=48.8570, longitude=2.3525),
+            velocity=10.0,  # Moving
+            bearing=90.0
+        )
+        
+        # Check that velocity is updated (not forced to zero)
+        state = train.get_current_state()
+        assert abs(state.velocity) > 5.0  # Should be non-zero and updated
+    
+    def test_zupt_reduces_velocity_covariance(self):
+        """Test that ZUPT reduces velocity covariance in the Kalman filter."""
+        position = Position2D(latitude=48.8566, longitude=2.3522)
+        initial_state = TrainStateVector(
+            position=position,
+            velocity=5.0,
+            acceleration=0.0,
+            bearing=90.0
+        )
+        
+        train = TrainEntity(
+            train_id="TRAIN_001",
+            trip_id="TRIP_001",
+            route_id="METRO_1",
+            initial_state=initial_state
+        )
+        
+        # Get initial velocity covariance
+        initial_velocity_variance = train.kalman.P[2, 2]
+        
+        # Apply ZUPT by updating with zero velocity
+        train.update_from_measurement(
+            position=position,
+            velocity=0.0,
+            bearing=90.0
+        )
+        
+        # Check that velocity covariance is reduced
+        final_velocity_variance = train.kalman.P[2, 2]
+        assert final_velocity_variance < initial_velocity_variance
+        assert final_velocity_variance < 0.01  # Should be drastically reduced
+    
+    def test_zupt_prevents_drift_during_stop(self):
+        """Test that ZUPT prevents the UKF from drifting when train is stopped."""
+        position = Position2D(latitude=48.8566, longitude=2.3522)
+        initial_state = TrainStateVector(
+            position=position,
+            velocity=10.0,  # Moving fast
+            acceleration=0.0,
+            bearing=90.0
+        )
+        
+        train = TrainEntity(
+            train_id="TRAIN_001",
+            trip_id="TRIP_001",
+            route_id="METRO_1",
+            initial_state=initial_state
+        )
+        
+        # Suddenly stop (like at a station)
+        train.update_from_measurement(
+            position=position,
+            velocity=0.0,  # Stopped abruptly
+            bearing=90.0
+        )
+        
+        # Without ZUPT, the filter would maintain some velocity due to inertia
+        # With ZUPT, velocity should be forced to zero
+        state = train.get_current_state()
+        assert abs(state.velocity) < 0.01
+        assert train.current_state == TrainState.STOPPED
