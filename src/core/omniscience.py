@@ -227,16 +227,35 @@ class OmniscienceEngine:
             resource_title = resource.get("title", "").lower()
             url = resource.get("url", "")
             
-            # Detect GTFS-RT resources
-            is_gtfs_rt = (
-                resource_format == "GTFS-RT" or
-                "gtfs-rt" in resource_title or
-                "gtfs_rt" in resource_title or
-                "realtime" in resource_title or
-                "real-time" in resource_title
-            )
+            if not url or url in self._discovered_urls:
+                continue
             
-            if is_gtfs_rt and url and url not in self._discovered_urls:
+            # Multi-layer GTFS-RT detection (most robust approach)
+            # 1. Check format field
+            is_gtfs_rt = resource_format == "GTFS-RT"
+            
+            # 2. Check title for keywords (original method)
+            if not is_gtfs_rt:
+                is_gtfs_rt = any(keyword in resource_title for keyword in [
+                    "gtfs-rt", "gtfs_rt", "gtfs rt",
+                    "realtime", "real-time", "real time"
+                ])
+            
+            # 3. Check mime_type field if available
+            if not is_gtfs_rt:
+                mime_type = resource.get("mime", "").lower()
+                # Use specific MIME types to avoid false positives
+                is_gtfs_rt = mime_type in [
+                    "application/x-protobuf",
+                    "application/octet-stream",
+                    "application/vnd.google.protobuf"
+                ]
+            
+            # 4. If still uncertain, check actual content-type header
+            if not is_gtfs_rt:
+                is_gtfs_rt = await self._is_gtfs_rt_by_content(url)
+            
+            if is_gtfs_rt:
                 # Determine resource type
                 resource_type = "vehicle-positions"
                 if any(keyword in resource_title for keyword in ["trip", "update", "tripupdate"]):
@@ -266,6 +285,57 @@ class OmniscienceEngine:
                 )
                 
         return resources_found
+        
+    async def _is_gtfs_rt_by_content(self, url: str) -> bool:
+        """
+        Check if a URL serves GTFS-RT content by inspecting HTTP headers.
+        
+        This is more robust than string matching as it checks actual content type.
+        Falls back gracefully if request fails.
+        
+        Args:
+            url: URL to check.
+            
+        Returns:
+            True if content appears to be GTFS-RT, False otherwise.
+        """
+        if not self._session:
+            return False
+            
+        try:
+            # Make HEAD request to check Content-Type without downloading data
+            async with self._session.head(
+                url,
+                timeout=aiohttp.ClientTimeout(total=5),
+                allow_redirects=True
+            ) as response:
+                content_type = response.headers.get('Content-Type', '').lower()
+                
+                # Check for protobuf indicators in content-type
+                is_protobuf = any(indicator in content_type for indicator in [
+                    'protobuf',
+                    'application/octet-stream',
+                    'application/x-protobuf',
+                    'application/vnd.google.protobuf'
+                ])
+                
+                if is_protobuf:
+                    logger.debug(
+                        "omniscience_gtfs_rt_detected_by_content_type",
+                        url=url,
+                        content_type=content_type
+                    )
+                    return True
+                    
+        except Exception as e:
+            # Don't fail if content check fails, just log
+            logger.debug(
+                "omniscience_content_check_failed",
+                url=url,
+                error=str(e)
+            )
+            
+        return False
         
     def get_operator(self, org_id: str) -> Optional[TransportOperator]:
         """Get a specific operator by ID."""

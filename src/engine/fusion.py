@@ -13,7 +13,7 @@ import asyncio
 import json
 import logging
 import math
-from typing import Dict, List, Optional, Tuple, Any
+from typing import Dict, List, Optional, Tuple, Any, Set
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
@@ -51,6 +51,54 @@ class DavisCoefficients:
     A: float = 5.0      # Rolling resistance (kN)
     B: float = 0.03     # Mechanical resistance (kN/(m/s))
     C: float = 0.0015   # Aerodynamic resistance (kN/(m/s)²)
+
+
+def get_davis_coefficients_for_route_type(route_type: Optional[int]) -> DavisCoefficients:
+    """
+    Get Davis coefficients based on GTFS route_type.
+    
+    Different vehicle types have different aerodynamic and mechanical properties.
+    This function returns appropriate coefficients based on the GTFS route_type:
+    
+    - 0: Tram/Streetcar/Light rail (low speed, urban)
+    - 1: Subway/Metro (medium speed, enclosed stations)
+    - 2: Rail/Intercity rail (high speed, open track)
+    - 3: Bus (road vehicle, not applicable)
+    - 4: Ferry (water vehicle, not applicable)
+    - 5-7: Cable/Gondola/Funicular (special cases)
+    
+    Args:
+        route_type: GTFS route_type integer, or None for default.
+        
+    Returns:
+        DavisCoefficients appropriate for the vehicle type.
+    """
+    if route_type is None:
+        # Default: Subway/Metro
+        return DavisCoefficients(A=5.0, B=0.03, C=0.0015)
+    
+    if route_type == 0:
+        # Tram/Light Rail: Lower speeds, frequent stops
+        return DavisCoefficients(A=4.0, B=0.025, C=0.0012)
+    
+    elif route_type == 1:
+        # Subway/Metro: Medium speeds, aerodynamic but in tunnels
+        return DavisCoefficients(A=5.0, B=0.03, C=0.0015)
+    
+    elif route_type == 2:
+        # Rail/Intercity: High speeds, significant aerodynamic drag
+        # TGV-style coefficients: lower rolling resistance but higher aero drag
+        return DavisCoefficients(A=3.5, B=0.02, C=0.0025)
+    
+    elif route_type in [5, 6, 7]:
+        # Cable/Gondola/Funicular: Very different physics
+        # Lower resistance due to cable-driven motion (no wheels on rails)
+        # Minimal aerodynamic drag due to low speeds
+        return DavisCoefficients(A=2.0, B=0.01, C=0.0005)
+    
+    else:
+        # Bus, Ferry, or unknown: Use default metro coefficients
+        return DavisCoefficients(A=5.0, B=0.03, C=0.0015)
 
 
 @dataclass
@@ -127,6 +175,7 @@ class TrainStateVector:
     acceleration: float         # m/s²
     bearing: float             # degrees
     gradient: float = 0.0      # Track gradient in radians
+    track_distance: Optional[float] = None  # Distance along track (PK - Point Kilométrique) in meters
     timestamp: float = field(default_factory=lambda: datetime.now().timestamp())
 
 
@@ -359,7 +408,8 @@ class TrainEntity:
         trip_id: Optional[str],
         route_id: Optional[str],
         initial_state: TrainStateVector,
-        properties: Optional[TrainPhysicalProperties] = None
+        properties: Optional[TrainPhysicalProperties] = None,
+        route_type: Optional[int] = None
     ) -> None:
         """
         Initialize a train entity.
@@ -370,11 +420,19 @@ class TrainEntity:
             route_id: Route identifier.
             initial_state: Initial state vector.
             properties: Physical properties of the train.
+            route_type: GTFS route_type for dynamic physics (0=Tram, 1=Subway, 2=Rail, etc.).
         """
         self.train_id = train_id
         self.trip_id = trip_id
         self.route_id = route_id
-        self.properties = properties or TrainPhysicalProperties()
+        self.route_type = route_type
+        
+        # Use route_type-specific physics if not provided explicitly
+        if properties is None:
+            davis_coeffs = get_davis_coefficients_for_route_type(route_type)
+            self.properties = TrainPhysicalProperties(davis=davis_coeffs)
+        else:
+            self.properties = properties
         
         # Initialize Kalman filter
         self.kalman = UnscentedKalmanFilter(initial_state)
@@ -631,6 +689,7 @@ class HybridFusionEngine:
         self._consumer: Optional[AIOKafkaConsumer] = None
         self._trains: Dict[str, TrainEntity] = {}
         self._trip_to_train: Dict[str, str] = {}  # trip_id -> train_id mapping
+        self._warned_routes: Set[str] = set()  # Track which routes we've warned about
         
         self._active = False
         self._simulation_rate = 1.0  # Hz
@@ -728,7 +787,8 @@ class HybridFusionEngine:
                 train_id=vehicle_id,
                 trip_id=trip_id,
                 route_id=data.get('route_id'),
-                initial_state=initial_state
+                initial_state=initial_state,
+                route_type=data.get('route_type')  # Pass route_type for dynamic physics
             )
             
             if trip_id:
@@ -787,19 +847,39 @@ class HybridFusionEngine:
                 routes[train.route_id].append(train)
                 
         # For each route, establish preceding/following relationships
-        # This is simplified - in reality would use track topology
-        for route_trains in routes.values():
+        for route_id, route_trains in routes.items():
             if len(route_trains) < 2:
                 continue
                 
-            # Sort by position along route (simplified - just use lat/lon)
-            # In reality, would use track distance
-            route_trains.sort(
-                key=lambda t: (
-                    t.get_current_state().position.latitude +
-                    t.get_current_state().position.longitude
-                )
+            # Check if all trains have track_distance
+            all_have_track_distance = all(
+                t.get_current_state().track_distance is not None
+                for t in route_trains
             )
+            
+            if all_have_track_distance:
+                # Sort by track distance (curvilinear distance along track)
+                # This is the correct method that handles loops and U-turns
+                route_trains.sort(
+                    key=lambda t: t.get_current_state().track_distance
+                )
+            else:
+                # Fallback to lat/lon sorting with warning
+                # CRITICAL: This is unsafe for routes with loops or U-turns
+                # Only log warning once per route to avoid log spam
+                if route_id not in self._warned_routes:
+                    logger.warning(
+                        "moving_block_fallback_to_latlon",
+                        route_id=route_id,
+                        reason="track_distance not available for all trains on route"
+                    )
+                    self._warned_routes.add(route_id)
+                route_trains.sort(
+                    key=lambda t: (
+                        t.get_current_state().position.latitude +
+                        t.get_current_state().position.longitude
+                    )
+                )
             
             # Set relationships
             for i in range(len(route_trains)):
