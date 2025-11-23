@@ -100,6 +100,9 @@ async def test_trip_update_updates_existing_train(stops_file):
     updated_state = train.get_current_state()
     
     # Position should be different (moved to STOP_NORTH)
+    # Note: Using larger tolerance (0.01) here because the Kalman filter blends
+    # the measurement with the previous state, so the position won't jump exactly
+    # to the new stop coordinates but will converge toward them
     assert updated_state.position.latitude != initial_state.position.latitude
     assert updated_state.position.latitude == pytest.approx(48.8800, abs=0.01)
     assert updated_state.position.longitude == pytest.approx(2.3550, abs=0.01)

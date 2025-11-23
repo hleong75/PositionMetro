@@ -668,8 +668,9 @@ class TrainEntity:
         self.kalman.update(measurement)
         
         if is_stopped:
-            # Apply Zero Velocity Update (ZUPT) constraint AFTER position update
-            # This prevents filter drift when train is stopped at stations
+            # Apply Zero Velocity Update (ZUPT) constraint AFTER the main measurement update
+            # ZUPT forces velocity/acceleration to zero to prevent filter drift during station stops
+            # This is applied as a second update step after the position has been updated above
             # Pass measured acceleration for dynamic covariance adjustment
             self.kalman.update(None, apply_zupt=True, measured_acceleration=acceleration)
             logger.debug(
@@ -1085,8 +1086,11 @@ class HybridFusionEngine:
             )
             return
         
-        # Find the next stop (first stop in the future or with arrival/departure times)
-        # GTFS-RT spec: stops are typically ordered by sequence
+        # Find the next stop with valid stop_id
+        # GTFS-RT spec: stops are typically ordered by sequence, with future stops first
+        # We use the first stop with a valid stop_id for position inference
+        # NOTE: In production, you may want to filter by arrival/departure times
+        # to ensure you're using a future stop rather than a past one
         next_stop = None
         for stop_update in stop_time_updates:
             stop_id = stop_update.get('stop_id')
@@ -1151,7 +1155,7 @@ class HybridFusionEngine:
                         route_id=route_id,
                         track_distance=track_distance,
                         cross_track_error=rail_lock.cross_track_error,
-                        gradient_degrees=math.degrees(gradient) if gradient else None,
+                        gradient_degrees=math.degrees(gradient) if gradient is not None else None,
                         confidence=rail_lock.confidence
                     )
             except Exception as e:
