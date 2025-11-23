@@ -1,12 +1,14 @@
 """
 Module C: Hybrid Neuro-Physics Engine (The Core)
 =================================================
-This module implements the heart of the HNPS v5.0 system, combining:
+This module implements the heart of the HNPS system, combining:
 - Davis Equation for train physics simulation
 - Unscented Kalman Filter for sensor fusion
 - Moving Block (Cantonnement) collision prevention
+- Rail-Lock spatial awareness (v6.0)
 
 HNPS v5.0 Component: Physics Simulation & State Estimation
+HNPS v6.0 Enhancement: Cognitive Rail-Lock Integration
 """
 
 import asyncio
@@ -24,6 +26,9 @@ from aiokafka import AIOKafkaConsumer
 from aiokafka.errors import KafkaError
 
 logger = structlog.get_logger(__name__)
+
+# HNPS v6.0: Rail-Lock configuration
+RAIL_LOCK_MAX_CROSS_TRACK_ERROR = 50.0  # meters - maximum acceptable error for Rail-Lock
 
 
 class TrainState(Enum):
@@ -788,7 +793,8 @@ class HybridFusionEngine:
         self,
         kafka_bootstrap_servers: str = "localhost:9092",
         kafka_topic: str = "raw_telemetry",
-        kafka_group_id: str = "fusion_engine"
+        kafka_group_id: str = "fusion_engine",
+        topology_path: Optional[str] = None
     ) -> None:
         """
         Initialize the fusion engine.
@@ -797,6 +803,8 @@ class HybridFusionEngine:
             kafka_bootstrap_servers: Kafka broker addresses.
             kafka_topic: Kafka topic to consume from.
             kafka_group_id: Consumer group ID.
+            topology_path: Path to topology JSON file for Rail-Lock (v6.0).
+                          If None, operates without Rail-Lock (degraded mode).
         """
         self._kafka_bootstrap_servers = kafka_bootstrap_servers
         self._kafka_topic = kafka_topic
@@ -809,6 +817,30 @@ class HybridFusionEngine:
         
         self._active = False
         self._simulation_rate = 1.0  # Hz
+        
+        # HNPS v6.0: Initialize Topology Engine for Rail-Lock
+        # Import here to avoid circular dependency and allow graceful degradation
+        try:
+            from src.engine.topology import TopologyEngine
+            self.topology = TopologyEngine(topology_path)
+            if self.topology.is_available():
+                logger.info(
+                    "fusion_engine_rail_lock_enabled",
+                    shapes_count=len(self.topology.shapes),
+                    routes_count=len(self.topology.route_to_shapes)
+                )
+            else:
+                logger.warning(
+                    "fusion_engine_rail_lock_degraded",
+                    reason="No topology loaded"
+                )
+        except Exception as e:
+            logger.warning(
+                "fusion_engine_rail_lock_disabled",
+                error=str(e),
+                reason="Topology engine initialization failed"
+            )
+            self.topology = None
         
     async def start(self) -> None:
         """Start the fusion engine."""
@@ -880,29 +912,79 @@ class HybridFusionEngine:
             await self._process_trip_update(data.get('data', {}))
             
     async def _process_vehicle_position(self, data: Dict[str, Any]) -> None:
-        """Process vehicle position update."""
+        """
+        Process vehicle position update.
+        
+        HNPS v6.0: Enhanced with Rail-Lock integration for absolute spatial awareness.
+        """
         vehicle_id = data.get('vehicle_id')
         trip_id = data.get('trip_id')
         
         if not vehicle_id:
             return
+        
+        # Extract position data
+        latitude = data.get('latitude', 0.0)
+        longitude = data.get('longitude', 0.0)
+        route_id = data.get('route_id')
+        
+        # HNPS v6.0: Attempt Rail-Lock projection for spatial awareness
+        track_distance = None
+        gradient = None
+        
+        if self.topology and self.topology.is_available():
+            try:
+                rail_lock = self.topology.get_rail_lock(latitude, longitude, route_id)
+                
+                if rail_lock and rail_lock.cross_track_error < RAIL_LOCK_MAX_CROSS_TRACK_ERROR:
+                    # Rail-Lock successful with acceptable error
+                    track_distance = rail_lock.track_distance
+                    gradient = rail_lock.gradient
+                    
+                    logger.debug(
+                        "rail_lock_applied",
+                        vehicle_id=vehicle_id,
+                        route_id=route_id,
+                        track_distance=track_distance,
+                        cross_track_error=rail_lock.cross_track_error,
+                        gradient_degrees=math.degrees(gradient),
+                        confidence=rail_lock.confidence
+                    )
+                elif rail_lock:
+                    # Rail-Lock found but error too high - log warning
+                    logger.debug(
+                        "rail_lock_rejected",
+                        vehicle_id=vehicle_id,
+                        route_id=route_id,
+                        cross_track_error=rail_lock.cross_track_error,
+                        reason=f"cross_track_error exceeds {RAIL_LOCK_MAX_CROSS_TRACK_ERROR}m threshold"
+                    )
+            except Exception as e:
+                # Silently handle Rail-Lock errors - don't crash the fusion loop
+                logger.debug(
+                    "rail_lock_error",
+                    vehicle_id=vehicle_id,
+                    error=str(e)
+                )
             
         # Get or create train entity
         if vehicle_id not in self._trains:
             initial_state = TrainStateVector(
                 position=Position2D(
-                    latitude=data.get('latitude', 0.0),
-                    longitude=data.get('longitude', 0.0)
+                    latitude=latitude,
+                    longitude=longitude
                 ),
                 velocity=data.get('speed', 0.0) or 0.0,
                 acceleration=0.0,
-                bearing=data.get('bearing', 0.0) or 0.0
+                bearing=data.get('bearing', 0.0) or 0.0,
+                track_distance=track_distance,
+                gradient=gradient
             )
             
             self._trains[vehicle_id] = TrainEntity(
                 train_id=vehicle_id,
                 trip_id=trip_id,
-                route_id=data.get('route_id'),
+                route_id=route_id,
                 initial_state=initial_state,
                 route_type=data.get('route_type')  # Pass route_type for dynamic physics
             )
@@ -910,16 +992,23 @@ class HybridFusionEngine:
             if trip_id:
                 self._trip_to_train[trip_id] = vehicle_id
         else:
-            # Update existing train
+            # Update existing train with Rail-Lock data
             train = self._trains[vehicle_id]
             position = Position2D(
-                latitude=data.get('latitude', 0.0),
-                longitude=data.get('longitude', 0.0)
+                latitude=latitude,
+                longitude=longitude
             )
+            
+            # HNPS v6.0: Inject Rail-Lock data into measurement update
+            # This automatically enables:
+            # 1. Cantonnement (Moving Block) - track_distance used for train ordering
+            # 2. 3D Physics (Gravity) - gradient used in Davis equation
             train.update_from_measurement(
                 position=position,
                 velocity=data.get('speed'),
-                bearing=data.get('bearing')
+                bearing=data.get('bearing'),
+                track_distance=track_distance,
+                gradient=gradient
             )
             
     async def _process_trip_update(self, data: Dict[str, Any]) -> None:
