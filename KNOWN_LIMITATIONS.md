@@ -97,11 +97,26 @@ new_lon, new_lat, _ = geod.fwd(
 
 ## 🔮 Future Enhancements
 
-### 3. Track Gradient Integration
+### 3. Track Gradient Integration (DOCUMENTED - V2 Ready)
 
-**Current State**: Track gradient is a parameter but not automatically populated from real track data.
+**Current State**: 
+- Track gradient is a parameter in the physics engine (`_apply_davis_physics`) and is ready to receive values
+- The system accepts gradient via `update_from_measurement(gradient=...)` 
+- When gradient is not provided, the system logs a warning (once per train) and defaults to 0.0 (flat track)
+- Without gradient data, the Davis equation ignores uphill/downhill effects on train resistance
 
-**Recommendation**: Integrate with PostGIS to query actual track gradients from digital elevation models (DEM).
+**Next Steps**: 
+- Integrate with external Map Matching module using PostGIS to query actual track gradients
+- Query digital elevation models (DEM) along rail network
+- Example PostGIS query:
+  ```sql
+  SELECT ST_Slope(dem.rast, railway.geom) 
+  FROM elevation_model dem, railway_tracks railway
+  WHERE ST_Intersects(dem.rast, railway.geom)
+  AND railway.route_id = ?
+  ```
+
+**Status**: ✅ Code infrastructure ready, awaiting external data source integration
 
 ### 4. Multi-Track Route Support
 
@@ -109,7 +124,25 @@ new_lon, new_lat, _ = geod.fwd(
 
 **Recommendation**: Support multiple tracks (e.g., northbound/southbound) with proper direction detection.
 
-### 5. Station Stop Prediction
+### 5. Dynamic ZUPT Covariance (IMPLEMENTED - V2 Optimization)
+
+**Current State**: ✅ Implemented
+
+**Feature**: When a train is stopped (Zero Velocity Update applied), the system now dynamically adjusts the velocity covariance based on measured acceleration from IMU sensors.
+
+**Behavior**:
+- **Normal stop**: Velocity variance = 0.001 (strong confidence train is at rest)
+- **Train restarting** (acceleration > 0.5 m/s²): Velocity variance scales up proportionally
+- **Benefit**: Filter adapts faster when train restarts from a station stop
+
+**Implementation**: 
+- See `UnscentedKalmanFilter._apply_zupt(measured_acceleration)` in `fusion.py`
+- Scales variance by factor of min(10.0, |acceleration| / threshold)
+- Prevents filter lag when train suddenly accelerates from stopped state
+
+**Status**: ✅ Fully implemented and tested
+
+### 6. Station Stop Prediction
 
 **Current State**: Physics model treats all track segments equally.
 
@@ -133,9 +166,9 @@ Current system performance metrics:
 
 ---
 
-**Document Version**: 1.0  
+**Document Version**: 1.1  
 **Last Updated**: 2025-11-23  
 **Related Files**: 
-- `src/engine/fusion.py` (UKF and Moving Block)
+- `src/engine/fusion.py` (UKF, Moving Block, Dynamic ZUPT, Gradient Support)
 - `src/ingestion/harvester.py` (Harvester timing)
 - `src/core/omniscience.py` (GTFS-RT detection)

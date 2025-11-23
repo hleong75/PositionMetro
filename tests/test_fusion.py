@@ -215,3 +215,169 @@ def test_unscented_kalman_filter_update():
     # State should be closer to measurement
     assert ukf.state[0] == pytest.approx(48.8567, abs=0.01)
     assert ukf.state[2] == pytest.approx(12.0, abs=1.0)
+
+
+def test_dynamic_zupt_covariance_normal():
+    """Test ZUPT with no acceleration - normal strong confidence."""
+    position = Position2D(latitude=48.8566, longitude=2.3522)
+    initial_state = TrainStateVector(
+        position=position,
+        velocity=0.0,
+        acceleration=0.0,
+        bearing=0.0
+    )
+    
+    ukf = UnscentedKalmanFilter(initial_state)
+    
+    # Apply ZUPT without measured acceleration
+    ukf.update(None, apply_zupt=True, measured_acceleration=None)
+    
+    # Velocity should be zero
+    assert ukf.state[2] == 0.0
+    # Velocity variance should be base value (strong confidence)
+    assert ukf.P[2, 2] == pytest.approx(0.001, abs=1e-6)
+
+
+def test_dynamic_zupt_covariance_with_acceleration():
+    """Test ZUPT with high acceleration - increased variance for faster adaptation."""
+    position = Position2D(latitude=48.8566, longitude=2.3522)
+    initial_state = TrainStateVector(
+        position=position,
+        velocity=0.0,
+        acceleration=0.0,
+        bearing=0.0
+    )
+    
+    ukf = UnscentedKalmanFilter(initial_state)
+    
+    # Apply ZUPT with high measured acceleration (train restarting)
+    high_acceleration = 1.0  # m/s² - train is accelerating from stop
+    ukf.update(None, apply_zupt=True, measured_acceleration=high_acceleration)
+    
+    # Velocity should still be zero
+    assert ukf.state[2] == 0.0
+    # But velocity variance should be higher to allow faster adaptation
+    assert ukf.P[2, 2] > 0.001  # Should be increased from base value
+
+
+def test_dynamic_zupt_covariance_scales_with_acceleration():
+    """Test that ZUPT covariance scales proportionally with measured acceleration."""
+    position = Position2D(latitude=48.8566, longitude=2.3522)
+    initial_state = TrainStateVector(
+        position=position,
+        velocity=0.0,
+        acceleration=0.0,
+        bearing=0.0
+    )
+    
+    # Test with low acceleration
+    ukf_low = UnscentedKalmanFilter(initial_state)
+    ukf_low.update(None, apply_zupt=True, measured_acceleration=0.6)
+    variance_low = ukf_low.P[2, 2]
+    
+    # Test with high acceleration
+    ukf_high = UnscentedKalmanFilter(initial_state)
+    ukf_high.update(None, apply_zupt=True, measured_acceleration=1.2)
+    variance_high = ukf_high.P[2, 2]
+    
+    # Higher acceleration should result in higher variance
+    assert variance_high > variance_low
+
+
+def test_train_entity_update_with_gradient():
+    """Test that gradient is properly stored when provided."""
+    position = Position2D(latitude=48.8566, longitude=2.3522)
+    initial_state = TrainStateVector(
+        position=position,
+        velocity=10.0,
+        acceleration=0.0,
+        bearing=0.0,
+        gradient=0.0
+    )
+    
+    train = TrainEntity(
+        train_id="TRAIN_GRADIENT_TEST",
+        trip_id="TRIP_GRADIENT",
+        route_id="RER_D",
+        initial_state=initial_state
+    )
+    
+    # Update with gradient (e.g., 2% uphill = 0.02 radians ≈ 0.0002 rad for small angles)
+    gradient_value = 0.035  # radians (approximately 2 degrees uphill)
+    new_position = Position2D(latitude=48.8600, longitude=2.3522)
+    train.update_from_measurement(
+        position=new_position,
+        velocity=15.0,
+        bearing=0.0,
+        gradient=gradient_value
+    )
+    
+    # Check gradient is stored
+    current_state = train.get_current_state()
+    assert current_state.gradient == gradient_value
+
+
+def test_train_entity_update_with_acceleration():
+    """Test that measured acceleration is passed through to ZUPT."""
+    position = Position2D(latitude=48.8566, longitude=2.3522)
+    initial_state = TrainStateVector(
+        position=position,
+        velocity=0.0,  # Train is stopped
+        acceleration=0.0,
+        bearing=0.0
+    )
+    
+    train = TrainEntity(
+        train_id="TRAIN_ACCEL_TEST",
+        trip_id="TRIP_ACCEL",
+        route_id="RER_E",
+        initial_state=initial_state
+    )
+    
+    # Simulate train restarting: velocity still near zero but high acceleration measured
+    train.update_from_measurement(
+        position=position,
+        velocity=0.05,  # Still below 0.1 threshold, will trigger ZUPT
+        bearing=0.0,
+        acceleration=1.0  # High acceleration indicates restart
+    )
+    
+    # Verify ZUPT was applied (velocity forced to zero)
+    current_state = train.get_current_state()
+    assert current_state.velocity == 0.0
+    
+    # Variance should be increased (we can't directly check P matrix from TrainEntity,
+    # but we verify the acceleration parameter was accepted without error)
+    assert train.train_id == "TRAIN_ACCEL_TEST"
+
+
+def test_gradient_warning_logged_once():
+    """Test that gradient warning is only logged once per train."""
+    position = Position2D(latitude=48.8566, longitude=2.3522)
+    initial_state = TrainStateVector(
+        position=position,
+        velocity=10.0,
+        acceleration=0.0,
+        bearing=0.0
+    )
+    
+    train = TrainEntity(
+        train_id="TRAIN_WARNING_TEST",
+        trip_id="TRIP_WARNING",
+        route_id="RER_F",
+        initial_state=initial_state
+    )
+    
+    # Update multiple times without gradient
+    for _ in range(3):
+        new_position = Position2D(latitude=48.8600, longitude=2.3522)
+        train.update_from_measurement(
+            position=new_position,
+            velocity=15.0,
+            bearing=0.0,
+            gradient=None  # No gradient provided
+        )
+    
+    # Check that warning flag is set (prevents multiple warnings)
+    assert hasattr(train, '_gradient_warning_logged')
+    assert train._gradient_warning_logged is True
