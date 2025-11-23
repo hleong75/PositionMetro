@@ -221,6 +221,140 @@ class TestHarvesterTimingFix:
             await harvester.stop()
 
 
+class TestKafkaReconnection:
+    """Test Kafka reconnection with exponential backoff."""
+    
+    @pytest.mark.asyncio
+    async def test_kafka_reconnection_on_startup_failure(self):
+        """Test that harvester retries Kafka connection with exponential backoff on startup failure."""
+        from aiokafka.errors import KafkaConnectionError
+        
+        # Track connection attempts
+        connection_attempts = []
+        
+        # Mock AIOKafkaProducer to fail first 2 attempts, succeed on 3rd
+        original_producer = None
+        
+        class MockProducer:
+            def __init__(self, *args, **kwargs):
+                connection_attempts.append(len(connection_attempts))
+                self.started = False
+            
+            async def start(self):
+                attempt = len(connection_attempts)
+                if attempt < 3:  # Fail first 2 attempts
+                    raise KafkaConnectionError("Connection failed")
+                self.started = True
+            
+            async def stop(self):
+                pass
+        
+        # Patch AIOKafkaProducer and asyncio.sleep (to speed up test)
+        with patch('src.ingestion.harvester.AIOKafkaProducer', MockProducer):
+            with patch('asyncio.sleep', new_callable=AsyncMock):
+                harvester = GTFSRTHarvester(
+                    kafka_bootstrap_servers="localhost:9092"
+                )
+                
+                # Start should retry and eventually succeed
+                await harvester.start()
+                
+                # Should have made 3 attempts (initial + 2 retries)
+                assert len(connection_attempts) == 3
+                assert harvester._producer is not None
+                assert harvester._producer.started is True
+                
+                await harvester.stop()
+    
+    @pytest.mark.asyncio
+    async def test_kafka_reconnection_exhausts_retries(self):
+        """Test that harvester gives up after max retries."""
+        from aiokafka.errors import KafkaConnectionError
+        
+        # Track connection attempts
+        connection_attempts = []
+        
+        class MockProducer:
+            def __init__(self, *args, **kwargs):
+                connection_attempts.append(len(connection_attempts))
+            
+            async def start(self):
+                # Always fail
+                raise KafkaConnectionError("Connection failed")
+            
+            async def stop(self):
+                pass
+        
+        # Patch AIOKafkaProducer and asyncio.sleep (to speed up test)
+        with patch('src.ingestion.harvester.AIOKafkaProducer', MockProducer):
+            with patch('asyncio.sleep', new_callable=AsyncMock):
+                harvester = GTFSRTHarvester(
+                    kafka_bootstrap_servers="localhost:9092"
+                )
+                
+                # Start should try MAX_RETRIES times then give up
+                await harvester.start()
+                
+                # Should have made MAX_RETRIES + 1 attempts (initial + MAX_RETRIES retries)
+                assert len(connection_attempts) == harvester.MAX_RETRIES + 1
+                # Producer should be None after exhausting retries
+                assert harvester._producer is None
+                
+                await harvester.stop()
+    
+    @pytest.mark.asyncio
+    async def test_kafka_reconnection_during_harvest_loop(self):
+        """Test that _connect_kafka is called when producer is None during harvest loop."""
+        
+        # Track if _connect_kafka was called
+        connect_called = []
+        
+        harvester = GTFSRTHarvester()
+        
+        # Mock _connect_kafka to track calls
+        async def mock_connect(retry_attempt=0):
+            connect_called.append(True)
+            return False  # Return False to keep producer None
+        
+        harvester._connect_kafka = mock_connect
+        
+        # Set up harvester state
+        harvester._producer = None
+        harvester._own_producer = True
+        harvester._active = True
+        
+        # Mock the harvest_resource to do nothing
+        harvester.harvest_resource = AsyncMock(return_value=HarvestMetrics(
+            url="test",
+            timestamp=datetime.now(),
+            status=FeedStatus.ACTIVE
+        ))
+        
+        # Create test resource
+        test_resource = GTFSRTResource(
+            url="https://example.com/gtfs-rt",
+            dataset_id="test",
+            organization="Test Operator",
+            resource_type="vehicle-positions",
+            title="Test Feed"
+        )
+        
+        # Mock asyncio.sleep to avoid delays and stop after first cycle
+        call_count = [0]
+        async def mock_sleep(duration):
+            call_count[0] += 1
+            if call_count[0] >= 1:
+                harvester._active = False
+        
+        with patch('asyncio.sleep', side_effect=mock_sleep):
+            await harvester.harvest_continuously([test_resource], interval=1.0)
+        
+        # Should have called _connect_kafka at least once
+        assert len(connect_called) > 0
+        
+        await harvester.stop()
+
+
 class TestGTFSRTDetectionFix:
     """Test improved GTFS-RT detection with content-type checking."""
     
