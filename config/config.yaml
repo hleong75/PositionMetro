@@ -1,0 +1,107 @@
+# Panoptique Ferroviaire - HNPS v5.0 Configuration
+
+# Application Metadata
+application:
+  name: "Panoptique Ferroviaire"
+  version: "5.0.0"
+  description: "Hybrid Neuro-Physical System for Railway Surveillance"
+
+# Kafka Configuration
+kafka:
+  bootstrap_servers: "${KAFKA_BOOTSTRAP_SERVERS:localhost:9092}"
+  topic_raw_telemetry: "${KAFKA_TOPIC_RAW_TELEMETRY:raw_telemetry}"
+  topic_fused_states: "fused_train_states"
+  consumer_group_id: "${KAFKA_GROUP_ID:neural_engine}"
+  producer:
+    compression_type: "gzip"
+    linger_ms: 10
+    batch_size: 32768
+    acks: 1
+
+# PostgreSQL/PostGIS Configuration
+database:
+  host: "${POSTGRES_HOST:localhost}"
+  port: ${POSTGRES_PORT:5432}
+  database: "${POSTGRES_DB:panoptique}"
+  user: "${POSTGRES_USER:panoptique}"
+  password: "${POSTGRES_PASSWORD:panoptique_secure_2024}"
+  pool_size: 20
+  max_overflow: 10
+
+# Omniscience Engine Configuration
+omniscience:
+  api_url: "https://transport.data.gouv.fr/api/datasets"
+  max_concurrent_requests: 10
+  refresh_interval: 3600  # seconds (1 hour)
+  cache_ttl: 1800  # seconds (30 minutes)
+
+# Harvester Configuration
+harvester:
+  max_concurrent_harvests: ${MAX_CONCURRENT_HARVESTS:20}
+  harvest_interval: ${HARVEST_INTERVAL:30.0}  # seconds
+  request_timeout: 10.0  # seconds
+  max_retries: 3
+  retry_delay: 5.0  # seconds
+  dead_feed_threshold: 300  # seconds (mark as dead after 5 minutes)
+
+# Fusion Engine Configuration
+fusion:
+  simulation_rate: ${SIMULATION_RATE:1.0}  # Hz
+  process_noise: 0.1
+  measurement_noise: 1.0
+  
+  # Train Physics
+  default_train_properties:
+    mass: 400000.0  # kg
+    length: 100.0  # meters
+    max_power: 2000.0  # kW
+    max_speed: 33.33  # m/s (120 km/h)
+    max_acceleration: 1.2  # m/s²
+    max_braking: -1.5  # m/s²
+    
+  # Davis Equation Coefficients
+  davis_coefficients:
+    A: 5.0  # Rolling resistance (kN)
+    B: 0.03  # Mechanical resistance (kN/(m/s))
+    C: 0.0015  # Aerodynamic resistance (kN/(m/s)²)
+    
+  # Moving Block (Cantonnement)
+  moving_block:
+    safe_distance: 500.0  # meters
+    collision_warning_time: 30.0  # seconds
+
+# Logging Configuration
+logging:
+  level: "${LOG_LEVEL:INFO}"
+  format: "json"
+  output:
+    - type: "console"
+    - type: "file"
+      path: "/app/logs/panoptique.log"
+      max_bytes: 104857600  # 100 MB
+      backup_count: 10
+
+# Performance Configuration
+performance:
+  uvloop_enabled: ${UVLOOP_ENABLED:true}
+  max_workers: 4
+  task_queue_size: 10000
+
+# Monitoring Configuration
+monitoring:
+  prometheus_enabled: true
+  prometheus_port: 9090
+  metrics_export_interval: 60  # seconds
+  
+  # Health check
+  health_check_enabled: true
+  health_check_interval: 30  # seconds
+
+# Feature Flags
+features:
+  auto_discovery: true
+  continuous_harvesting: true
+  physics_simulation: true
+  moving_block_enforcement: true
+  predictive_analytics: false  # Future feature
+  neural_network_fusion: false  # Future feature
