@@ -660,8 +660,9 @@ class TestGhostTrainFix:
         assert 'TRIP_X' in engine._trip_to_train
         assert engine._trip_to_train['TRIP_X'] == 'VEH_X'
         
-        # Old identifier should be removed
-        assert 'TRIP_X' not in engine._trains or engine._trains['TRIP_X'].train_id == 'VEH_X'
+        # Old identifier (TRIP_X) should no longer exist in _trains dict
+        # (it has been migrated to VEH_X)
+        assert 'TRIP_X' not in engine._trains
     
     @pytest.mark.asyncio
     async def test_trip_update_with_vehicle_id_from_start(self, tmp_path):

@@ -1060,10 +1060,10 @@ class HybridFusionEngine:
         vehicle_id = data.get('vehicle_id')
         route_id = data.get('route_id')
         
-        # --- CORRECTION DOUBLONS (GHOST TRAIN FIX) ---
-        # 1. Si vehicle_id est présent, c'est la vérité terrain.
-        # 2. Si absent, on vérifie si on connait déjà le train associé à ce trip (mapping).
-        # 3. Sinon, on utilise le trip_id comme identifiant temporaire.
+        # --- GHOST TRAIN FIX: Robust ID Resolution ---
+        # 1. If vehicle_id is present, it's the ground truth.
+        # 2. If absent, check if we already know the train associated with this trip (mapping).
+        # 3. Otherwise, use trip_id as temporary identifier.
         resolved_train_id = vehicle_id
         if not resolved_train_id and trip_id:
             resolved_train_id = self._trip_to_train.get(trip_id)
@@ -1098,7 +1098,7 @@ class HybridFusionEngine:
                     reason="vehicle_id appeared after initial creation with trip_id"
                 )
         
-        # Force la mise à jour du mapping immédiatement
+        # Force update of mapping immediately
         if trip_id and train_id:
             self._trip_to_train[trip_id] = train_id
         
