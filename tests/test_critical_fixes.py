@@ -10,6 +10,7 @@ from src.engine.fusion import (
     Position2D,
     TrainStateVector,
     TrainEntity,
+    TrainState,
     HybridFusionEngine,
     get_davis_coefficients_for_route_type,
     DavisCoefficients
@@ -95,6 +96,58 @@ class TestMovingBlockFix:
             
         finally:
             await engine.stop()
+    
+    @pytest.mark.asyncio
+    async def test_moving_block_disabled_without_track_distance(self):
+        """Test that moving blocks are disabled (not using lat/lon) when track_distance unavailable."""
+        engine = HybridFusionEngine()
+        await engine.start()
+        
+        try:
+            # Create trains WITHOUT track_distance on same route
+            train1_state = TrainStateVector(
+                position=Position2D(latitude=48.8566, longitude=2.3522),
+                velocity=10.0,
+                acceleration=0.0,
+                bearing=0.0,
+                track_distance=None  # No track distance
+            )
+            train1 = TrainEntity(
+                train_id="TRAIN_001",
+                trip_id="TRIP_001",
+                route_id="RER_A",
+                initial_state=train1_state
+            )
+            
+            train2_state = TrainStateVector(
+                position=Position2D(latitude=48.8500, longitude=2.3500),
+                velocity=10.0,
+                acceleration=0.0,
+                bearing=0.0,
+                track_distance=None  # No track distance
+            )
+            train2 = TrainEntity(
+                train_id="TRAIN_002",
+                trip_id="TRIP_002",
+                route_id="RER_A",
+                initial_state=train2_state
+            )
+            
+            # Add trains to engine
+            engine._trains["TRAIN_001"] = train1
+            engine._trains["TRAIN_002"] = train2
+            
+            # Update moving blocks
+            engine._update_moving_blocks()
+            
+            # Both trains should have NO relationships (degraded mode)
+            assert train1.preceding_train is None
+            assert train1.following_train is None
+            assert train2.preceding_train is None
+            assert train2.following_train is None
+            
+        finally:
+            await engine.stop()
 
 
 class TestHarvesterTimingFix:
@@ -126,8 +179,12 @@ class TestHarvesterTimingFix:
                 harvester._active = False
         
         # Create harvester with mocked methods
+        # Don't connect to Kafka to avoid delays from reconnection attempts
         harvester = GTFSRTHarvester()
-        await harvester.start()
+        harvester._session = Mock()  # Mock session to avoid real HTTP connection
+        harvester._producer = None  # No Kafka producer
+        harvester._own_producer = False  # Don't try to reconnect
+        harvester._active = True
         
         try:
             # Mock harvest_resource to simulate processing time
@@ -166,7 +223,141 @@ class TestHarvesterTimingFix:
             assert 0.9 < sleep_times[0] < 1.0  # Should be close to 0.95
                 
         finally:
-            await harvester.stop()
+            harvester._active = False  # Stop harvester
+
+
+class TestKafkaReconnection:
+    """Test Kafka reconnection with exponential backoff."""
+    
+    @pytest.mark.asyncio
+    async def test_kafka_reconnection_on_startup_failure(self):
+        """Test that harvester retries Kafka connection with exponential backoff on startup failure."""
+        from aiokafka.errors import KafkaConnectionError
+        
+        # Track connection attempts
+        connection_attempts = []
+        
+        # Mock AIOKafkaProducer to fail first 2 attempts, succeed on 3rd
+        original_producer = None
+        
+        class MockProducer:
+            def __init__(self, *args, **kwargs):
+                connection_attempts.append(len(connection_attempts))
+                self.started = False
+            
+            async def start(self):
+                attempt = len(connection_attempts)
+                if attempt < 3:  # Fail first 2 attempts
+                    raise KafkaConnectionError("Connection failed")
+                self.started = True
+            
+            async def stop(self):
+                pass
+        
+        # Patch AIOKafkaProducer and asyncio.sleep (to speed up test)
+        with patch('src.ingestion.harvester.AIOKafkaProducer', MockProducer):
+            with patch('asyncio.sleep', new_callable=AsyncMock):
+                harvester = GTFSRTHarvester(
+                    kafka_bootstrap_servers="localhost:9092"
+                )
+                
+                # Start should retry and eventually succeed
+                await harvester.start()
+                
+                # Should have made 3 attempts (initial + 2 retries)
+                assert len(connection_attempts) == 3
+                assert harvester._producer is not None
+                assert harvester._producer.started is True
+                
+                await harvester.stop()
+    
+    @pytest.mark.asyncio
+    async def test_kafka_reconnection_exhausts_retries(self):
+        """Test that harvester gives up after max retries."""
+        from aiokafka.errors import KafkaConnectionError
+        
+        # Track connection attempts
+        connection_attempts = []
+        
+        class MockProducer:
+            def __init__(self, *args, **kwargs):
+                connection_attempts.append(len(connection_attempts))
+            
+            async def start(self):
+                # Always fail
+                raise KafkaConnectionError("Connection failed")
+            
+            async def stop(self):
+                pass
+        
+        # Patch AIOKafkaProducer and asyncio.sleep (to speed up test)
+        with patch('src.ingestion.harvester.AIOKafkaProducer', MockProducer):
+            with patch('asyncio.sleep', new_callable=AsyncMock):
+                harvester = GTFSRTHarvester(
+                    kafka_bootstrap_servers="localhost:9092"
+                )
+                
+                # Start should try MAX_RETRIES times then give up
+                await harvester.start()
+                
+                # Should have made MAX_RETRIES + 1 attempts (initial + MAX_RETRIES retries)
+                assert len(connection_attempts) == harvester.MAX_RETRIES + 1
+                # Producer should be None after exhausting retries
+                assert harvester._producer is None
+                
+                await harvester.stop()
+    
+    @pytest.mark.asyncio
+    async def test_kafka_reconnection_during_harvest_loop(self):
+        """Test that _connect_kafka is called when producer is None during harvest loop."""
+        
+        # Track if _connect_kafka was called
+        connect_called = []
+        
+        harvester = GTFSRTHarvester()
+        
+        # Mock _connect_kafka to track calls
+        async def mock_connect(retry_attempt=0):
+            connect_called.append(True)
+            return False  # Return False to keep producer None
+        
+        harvester._connect_kafka = mock_connect
+        
+        # Set up harvester state
+        harvester._producer = None
+        harvester._own_producer = True
+        harvester._active = True
+        
+        # Mock the harvest_resource to do nothing
+        harvester.harvest_resource = AsyncMock(return_value=HarvestMetrics(
+            url="test",
+            timestamp=datetime.now(),
+            status=FeedStatus.ACTIVE
+        ))
+        
+        # Create test resource
+        test_resource = GTFSRTResource(
+            url="https://example.com/gtfs-rt",
+            dataset_id="test",
+            organization="Test Operator",
+            resource_type="vehicle-positions",
+            title="Test Feed"
+        )
+        
+        # Mock asyncio.sleep to avoid delays and stop after first cycle
+        call_count = [0]
+        async def mock_sleep(duration):
+            call_count[0] += 1
+            if call_count[0] >= 1:
+                harvester._active = False
+        
+        with patch('asyncio.sleep', side_effect=mock_sleep):
+            await harvester.harvest_continuously([test_resource], interval=1.0)
+        
+        # Should have called _connect_kafka at least once
+        assert len(connect_called) > 0
+        
+        await harvester.stop()
 
 
 class TestGTFSRTDetectionFix:
@@ -274,3 +465,126 @@ class TestDynamicDavisCoefficients:
         assert train.properties.davis.A == 3.5
         assert train.properties.davis.B == 0.02
         assert train.properties.davis.C == 0.0025
+
+
+class TestZeroVelocityUpdate:
+    """Test Zero Velocity Update (ZUPT) for stopped trains."""
+    
+    def test_zupt_applied_when_velocity_zero(self):
+        """Test that ZUPT is applied when measured velocity is zero."""
+        position = Position2D(latitude=48.8566, longitude=2.3522)
+        initial_state = TrainStateVector(
+            position=position,
+            velocity=5.0,  # Initially moving
+            acceleration=0.0,
+            bearing=90.0
+        )
+        
+        train = TrainEntity(
+            train_id="TRAIN_001",
+            trip_id="TRIP_001",
+            route_id="METRO_1",
+            initial_state=initial_state
+        )
+        
+        # Update with zero velocity (train stopped)
+        train.update_from_measurement(
+            position=position,
+            velocity=0.0,  # Stopped
+            bearing=90.0
+        )
+        
+        # Check that velocity and acceleration are constrained to zero
+        state = train.get_current_state()
+        assert abs(state.velocity) < 0.01  # Should be very close to zero
+        assert abs(state.acceleration) < 0.01  # Should be very close to zero
+    
+    def test_zupt_not_applied_when_moving(self):
+        """Test that ZUPT is not applied when train is moving."""
+        position = Position2D(latitude=48.8566, longitude=2.3522)
+        initial_state = TrainStateVector(
+            position=position,
+            velocity=5.0,
+            acceleration=0.0,
+            bearing=90.0
+        )
+        
+        train = TrainEntity(
+            train_id="TRAIN_001",
+            trip_id="TRIP_001",
+            route_id="METRO_1",
+            initial_state=initial_state
+        )
+        
+        # Update with non-zero velocity (train moving)
+        train.update_from_measurement(
+            position=Position2D(latitude=48.8570, longitude=2.3525),
+            velocity=10.0,  # Moving
+            bearing=90.0
+        )
+        
+        # Check that velocity is updated (not forced to zero)
+        state = train.get_current_state()
+        assert abs(state.velocity) > 5.0  # Should be non-zero and updated
+    
+    def test_zupt_reduces_velocity_covariance(self):
+        """Test that ZUPT reduces velocity covariance in the Kalman filter."""
+        position = Position2D(latitude=48.8566, longitude=2.3522)
+        initial_state = TrainStateVector(
+            position=position,
+            velocity=5.0,
+            acceleration=0.0,
+            bearing=90.0
+        )
+        
+        train = TrainEntity(
+            train_id="TRAIN_001",
+            trip_id="TRIP_001",
+            route_id="METRO_1",
+            initial_state=initial_state
+        )
+        
+        # Get initial velocity covariance
+        initial_velocity_variance = train.kalman.P[2, 2]
+        
+        # Apply ZUPT by updating with zero velocity
+        train.update_from_measurement(
+            position=position,
+            velocity=0.0,
+            bearing=90.0
+        )
+        
+        # Check that velocity covariance is reduced
+        final_velocity_variance = train.kalman.P[2, 2]
+        assert final_velocity_variance < initial_velocity_variance
+        assert final_velocity_variance < 0.01  # Should be drastically reduced
+    
+    def test_zupt_prevents_drift_during_stop(self):
+        """Test that ZUPT prevents the UKF from drifting when train is stopped."""
+        position = Position2D(latitude=48.8566, longitude=2.3522)
+        initial_state = TrainStateVector(
+            position=position,
+            velocity=10.0,  # Moving fast
+            acceleration=0.0,
+            bearing=90.0
+        )
+        
+        train = TrainEntity(
+            train_id="TRAIN_001",
+            trip_id="TRIP_001",
+            route_id="METRO_1",
+            initial_state=initial_state
+        )
+        
+        # Suddenly stop (like at a station)
+        train.update_from_measurement(
+            position=position,
+            velocity=0.0,  # Stopped abruptly
+            bearing=90.0
+        )
+        
+        # Without ZUPT, the filter would maintain some velocity due to inertia
+        # With ZUPT, velocity should be forced to zero
+        state = train.get_current_state()
+        assert abs(state.velocity) < 0.01
+        assert train.current_state == TrainState.STOPPED

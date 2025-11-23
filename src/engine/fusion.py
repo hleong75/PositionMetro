@@ -272,14 +272,22 @@ class UnscentedKalmanFilter:
             diff = predicted_sigma_points[:, i] - self.state
             self.P += self.Wc[i] * np.outer(diff, diff)
             
-    def update(self, measurement: np.ndarray) -> None:
+    def update(self, measurement: Optional[np.ndarray], apply_zupt: bool = False) -> None:
         """
         Update step: correct prediction with measurement.
         
         Args:
             measurement: Measurement vector [lat, lon, velocity, acceleration, bearing].
+                        Can be None when apply_zupt is True.
+            apply_zupt: Apply Zero Velocity Update (ZUPT) constraint for stopped trains.
+                       When True, measurement is not used.
         """
         n = len(self.state)
+        
+        # Apply ZUPT if requested (train is stopped)
+        if apply_zupt:
+            self._apply_zupt()
+            return
         
         # Generate sigma points from predicted state
         sigma_points = self._generate_sigma_points()
@@ -310,6 +318,29 @@ class UnscentedKalmanFilter:
         
         # Update covariance
         self.P -= np.dot(K, np.dot(Pz, K.T))
+    
+    def _apply_zupt(self) -> None:
+        """
+        Apply Zero Velocity Update (ZUPT) constraint.
+        
+        When a train is stopped at a station, force velocity and acceleration to zero
+        and reduce their covariance to prevent the filter from drifting due to inertia.
+        This improves accuracy during station stops.
+        """
+        # Force velocity and acceleration to zero
+        self.state[2] = 0.0  # velocity
+        self.state[3] = 0.0  # acceleration
+        
+        # Drastically reduce covariance for velocity and acceleration
+        # This tells the filter we're very confident these values are zero
+        self.P[2, 2] = 0.001  # velocity variance
+        self.P[3, 3] = 0.001  # acceleration variance
+        
+        # Also reduce cross-covariances involving velocity and acceleration
+        self.P[2, :] *= 0.1
+        self.P[:, 2] *= 0.1
+        self.P[3, :] *= 0.1
+        self.P[:, 3] *= 0.1
         
     def _generate_sigma_points(self) -> np.ndarray:
         """Generate sigma points for UKF."""
@@ -442,6 +473,10 @@ class TrainEntity:
         self.state_history: List[TrainStateVector] = [initial_state]
         self.current_state = TrainState.UNKNOWN
         
+        # Track distance and gradient (not part of Kalman filter state)
+        self.track_distance = initial_state.track_distance
+        self.gradient = initial_state.gradient
+        
         # Moving block tracking
         self.preceding_train: Optional["TrainEntity"] = None
         self.following_train: Optional["TrainEntity"] = None
@@ -554,7 +589,9 @@ class TrainEntity:
         self,
         position: Position2D,
         velocity: Optional[float],
-        bearing: Optional[float]
+        bearing: Optional[float],
+        track_distance: Optional[float] = None,
+        gradient: Optional[float] = None
     ) -> None:
         """
         Update train state from real-time measurement (GTFS-RT data).
@@ -563,20 +600,40 @@ class TrainEntity:
             position: Measured position.
             velocity: Measured velocity (m/s).
             bearing: Measured bearing (degrees).
+            track_distance: Distance along track (PK) in meters.
+            gradient: Track gradient in radians.
         """
         current_state = self.kalman.get_state_vector()
         
-        # Construct measurement vector
-        measurement = np.array([
-            position.latitude,
-            position.longitude,
-            velocity if velocity is not None else current_state.velocity,
-            0.0,  # Acceleration not directly measured
-            bearing if bearing is not None else current_state.bearing
-        ])
+        # Determine if train is stopped (for ZUPT application)
+        measured_velocity = velocity if velocity is not None else current_state.velocity
+        is_stopped = abs(measured_velocity) < 0.1  # Threshold for stopped train
         
-        # Update Kalman filter
-        self.kalman.update(measurement)
+        if is_stopped:
+            # Apply Zero Velocity Update (ZUPT) constraint
+            # This prevents filter drift when train is stopped at stations
+            self.kalman.update(None, apply_zupt=True)
+            logger.debug(
+                "train_zupt_applied",
+                train_id=self.train_id,
+                reason="measured_velocity near zero"
+            )
+        else:
+            # Normal Kalman filter update
+            measurement = np.array([
+                position.latitude,
+                position.longitude,
+                measured_velocity,
+                0.0,  # Acceleration not directly measured
+                bearing if bearing is not None else current_state.bearing
+            ])
+            self.kalman.update(measurement)
+        
+        # Update track distance and gradient if provided
+        if track_distance is not None:
+            self.track_distance = track_distance
+        if gradient is not None:
+            self.gradient = gradient
         
         # Update timestamp
         self.last_update = datetime.now()
@@ -654,7 +711,11 @@ class TrainEntity:
         
     def get_current_state(self) -> TrainStateVector:
         """Get current estimated state."""
-        return self.kalman.get_state_vector()
+        state = self.kalman.get_state_vector()
+        # Include track_distance and gradient which are tracked separately
+        state.track_distance = self.track_distance
+        state.gradient = self.gradient
+        return state
 
 
 class HybridFusionEngine:
@@ -863,35 +924,34 @@ class HybridFusionEngine:
                 route_trains.sort(
                     key=lambda t: t.get_current_state().track_distance
                 )
+                
+                # Set relationships
+                for i in range(len(route_trains)):
+                    if i > 0:
+                        route_trains[i].preceding_train = route_trains[i - 1]
+                    else:
+                        route_trains[i].preceding_train = None
+                        
+                    if i < len(route_trains) - 1:
+                        route_trains[i].following_train = route_trains[i + 1]
+                    else:
+                        route_trains[i].following_train = None
             else:
-                # Fallback to lat/lon sorting with warning
-                # CRITICAL: This is unsafe for routes with loops or U-turns
-                # Only log warning once per route to avoid log spam
+                # CRITICAL FIX: Do NOT sort by lat/lon as it's unsafe for routes with loops/U-turns
+                # Instead, disable cantonnement (degraded mode) for this route
+                # Better to have no safety than false safety that causes incorrect braking
                 if route_id not in self._warned_routes:
                     logger.warning(
-                        "moving_block_fallback_to_latlon",
+                        "moving_block_disabled_degraded_mode",
                         route_id=route_id,
-                        reason="track_distance not available for all trains on route"
+                        reason="track_distance not available - cantonnement disabled for safety"
                     )
                     self._warned_routes.add(route_id)
-                route_trains.sort(
-                    key=lambda t: (
-                        t.get_current_state().position.latitude +
-                        t.get_current_state().position.longitude
-                    )
-                )
-            
-            # Set relationships
-            for i in range(len(route_trains)):
-                if i > 0:
-                    route_trains[i].preceding_train = route_trains[i - 1]
-                else:
-                    route_trains[i].preceding_train = None
-                    
-                if i < len(route_trains) - 1:
-                    route_trains[i].following_train = route_trains[i + 1]
-                else:
-                    route_trains[i].following_train = None
+                
+                # Clear all relationships - trains operate independently
+                for train in route_trains:
+                    train.preceding_train = None
+                    train.following_train = None
                     
     def get_train(self, train_id: str) -> Optional[TrainEntity]:
         """Get a train by ID."""

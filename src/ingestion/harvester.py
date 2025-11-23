@@ -147,28 +147,68 @@ class GTFSRTHarvester:
             self._session = aiohttp.ClientSession()
             
         if self._own_producer:
-            self._producer = AIOKafkaProducer(
-                bootstrap_servers=self._kafka_bootstrap_servers,
-                value_serializer=lambda v: json.dumps(v).encode('utf-8'),
-                compression_type='gzip'
-            )
-            try:
-                await self._producer.start()
-                logger.info(
-                    "harvester_kafka_connected",
-                    bootstrap_servers=self._kafka_bootstrap_servers
-                )
-            except Exception as e:
-                logger.warning(
-                    "harvester_kafka_connection_failed",
-                    error=str(e),
-                    note="Will continue without Kafka publishing"
-                )
-                # Continue without Kafka - useful for testing
-                self._producer = None
+            await self._connect_kafka()
                 
         self._active = True
         logger.info("harvester_started")
+    
+    async def _connect_kafka(self, retry_attempt: int = 0) -> bool:
+        """
+        Connect to Kafka with exponential backoff retry logic.
+        
+        Args:
+            retry_attempt: Current retry attempt number (0 = first attempt).
+            
+        Returns:
+            True if connection successful, False otherwise.
+        """
+        try:
+            # Create new producer if needed
+            if self._producer is None:
+                self._producer = AIOKafkaProducer(
+                    bootstrap_servers=self._kafka_bootstrap_servers,
+                    value_serializer=lambda v: json.dumps(v).encode('utf-8'),
+                    compression_type='gzip'
+                )
+            
+            # Attempt to start the producer
+            await self._producer.start()
+            logger.info(
+                "harvester_kafka_connected",
+                bootstrap_servers=self._kafka_bootstrap_servers,
+                retry_attempt=retry_attempt
+            )
+            return True
+            
+        except Exception as e:
+            logger.warning(
+                "harvester_kafka_connection_failed",
+                error=str(e),
+                retry_attempt=retry_attempt,
+                max_retries=self.MAX_RETRIES
+            )
+            
+            # Set producer to None on failure
+            self._producer = None
+            
+            # Retry with exponential backoff if we haven't exceeded max retries
+            if retry_attempt < self.MAX_RETRIES:
+                # Exponential backoff: delay * (2 ^ retry_attempt)
+                delay = self.RETRY_DELAY * (2 ** retry_attempt)
+                logger.info(
+                    "harvester_kafka_retry_scheduled",
+                    retry_attempt=retry_attempt + 1,
+                    delay_seconds=delay
+                )
+                await asyncio.sleep(delay)
+                return await self._connect_kafka(retry_attempt + 1)
+            else:
+                logger.error(
+                    "harvester_kafka_connection_exhausted",
+                    max_retries=self.MAX_RETRIES,
+                    note="Will continue without Kafka publishing in degraded mode"
+                )
+                return False
         
     async def stop(self) -> None:
         """Stop the harvester (close connections)."""
@@ -498,6 +538,11 @@ class GTFSRTHarvester:
                 failed=len(resources) - successful,
                 processing_time=processing_time
             )
+            
+            # Check if Kafka connection is down and attempt reconnection
+            if self._own_producer and self._producer is None:
+                logger.info("harvester_attempting_kafka_reconnection")
+                await self._connect_kafka()
             
             # Calculate dynamic sleep time to maintain exact interval
             # This prevents temporal drift where processing time accumulates
