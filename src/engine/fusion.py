@@ -657,9 +657,20 @@ class TrainEntity:
         measured_velocity = velocity if velocity is not None else current_state.velocity
         is_stopped = abs(measured_velocity) < 0.1  # Threshold for stopped train
         
+        # Always update position measurement (even when stopped)
+        measurement = np.array([
+            position.latitude,
+            position.longitude,
+            measured_velocity,
+            acceleration if acceleration is not None else 0.0,
+            bearing if bearing is not None else current_state.bearing
+        ])
+        self.kalman.update(measurement)
+        
         if is_stopped:
-            # Apply Zero Velocity Update (ZUPT) constraint
-            # This prevents filter drift when train is stopped at stations
+            # Apply Zero Velocity Update (ZUPT) constraint AFTER the main measurement update
+            # ZUPT forces velocity/acceleration to zero to prevent filter drift during station stops
+            # This is applied as a second update step after the position has been updated above
             # Pass measured acceleration for dynamic covariance adjustment
             self.kalman.update(None, apply_zupt=True, measured_acceleration=acceleration)
             logger.debug(
@@ -667,16 +678,6 @@ class TrainEntity:
                 train_id=self.train_id,
                 reason="measured_velocity near zero"
             )
-        else:
-            # Normal Kalman filter update
-            measurement = np.array([
-                position.latitude,
-                position.longitude,
-                measured_velocity,
-                acceleration if acceleration is not None else 0.0,  # Use measured acceleration if available
-                bearing if bearing is not None else current_state.bearing
-            ])
-            self.kalman.update(measurement)
         
         # Update track distance and gradient if provided
         if track_distance is not None:
@@ -794,7 +795,8 @@ class HybridFusionEngine:
         kafka_bootstrap_servers: str = "localhost:9092",
         kafka_topic: str = "raw_telemetry",
         kafka_group_id: str = "fusion_engine",
-        topology_path: Optional[str] = None
+        topology_path: Optional[str] = None,
+        stops_path: Optional[str] = None
     ) -> None:
         """
         Initialize the fusion engine.
@@ -805,6 +807,8 @@ class HybridFusionEngine:
             kafka_group_id: Consumer group ID.
             topology_path: Path to topology JSON file for Rail-Lock (v6.0).
                           If None, operates without Rail-Lock (degraded mode).
+            stops_path: Path to GTFS static stops.txt file for Holographic Positioning (v5.0).
+                       If None, operates without positional inference (degraded mode).
         """
         self._kafka_bootstrap_servers = kafka_bootstrap_servers
         self._kafka_topic = kafka_topic
@@ -817,6 +821,29 @@ class HybridFusionEngine:
         
         self._active = False
         self._simulation_rate = 1.0  # Hz
+        
+        # HNPS v5.0: Initialize Stop Registry for Holographic Positioning
+        # Import here to avoid circular dependency and allow graceful degradation
+        try:
+            from src.engine.stops import StopRegistry
+            self.stop_registry = StopRegistry(stops_path)
+            if self.stop_registry.is_available():
+                logger.info(
+                    "fusion_engine_holographic_positioning_enabled",
+                    stops_count=self.stop_registry.get_stops_count()
+                )
+            else:
+                logger.warning(
+                    "fusion_engine_holographic_positioning_degraded",
+                    reason="No stops.txt loaded"
+                )
+        except Exception as e:
+            logger.warning(
+                "fusion_engine_holographic_positioning_disabled",
+                error=str(e),
+                reason="Stop Registry initialization failed"
+            )
+            self.stop_registry = None
         
         # HNPS v6.0: Initialize Topology Engine for Rail-Lock
         # Import here to avoid circular dependency and allow graceful degradation
@@ -1012,12 +1039,196 @@ class HybridFusionEngine:
             )
             
     async def _process_trip_update(self, data: Dict[str, Any]) -> None:
-        """Process trip update message."""
+        """
+        Process trip update message with Holographic Positioning.
+        
+        HNPS v5.0 CRITICAL ENHANCEMENT: This method is now the CORE of the system
+        when VehiclePosition data is unavailable. It implements Positional Inference
+        by converting stop_id to GPS coordinates using the Stop Registry.
+        
+        Key Features:
+        - Creates trains from TripUpdate alone (no VehiclePosition needed)
+        - Infers position from next stop_id via Stop Registry
+        - Injects virtual position into Kalman filter
+        - Uses topology_engine to obtain PK (track_distance) if available
+        - Falls back to trip_id as identifier if vehicle_id is missing
+        
+        This is Holographic Positioning: reconstructing full spatial awareness
+        from minimal information (wait times only).
+        """
         trip_id = data.get('trip_id')
         vehicle_id = data.get('vehicle_id')
+        route_id = data.get('route_id')
         
+        # CRITICAL: Use vehicle_id if available, otherwise fall back to trip_id
+        # This handles cases where TripUpdate doesn't include vehicle_id
+        train_id = vehicle_id if vehicle_id else trip_id
+        
+        if not train_id:
+            logger.debug(
+                "trip_update_skipped",
+                reason="No vehicle_id or trip_id available"
+            )
+            return
+        
+        # Maintain trip_id to train_id mapping
         if trip_id and vehicle_id:
             self._trip_to_train[trip_id] = vehicle_id
+        
+        # Extract stop_time_updates - these contain the upcoming stops
+        stop_time_updates = data.get('stop_time_updates', [])
+        
+        if not stop_time_updates:
+            logger.debug(
+                "trip_update_no_stops",
+                train_id=train_id,
+                reason="No stop_time_updates in TripUpdate"
+            )
+            return
+        
+        # Find the next stop with valid stop_id
+        # GTFS-RT spec: stops are typically ordered by sequence, with future stops first
+        # We use the first stop with a valid stop_id for position inference
+        # NOTE: In production, you may want to filter by arrival/departure times
+        # to ensure you're using a future stop rather than a past one
+        next_stop = None
+        for stop_update in stop_time_updates:
+            stop_id = stop_update.get('stop_id')
+            if stop_id:
+                next_stop = stop_id
+                break  # Use first stop with valid stop_id
+        
+        if not next_stop:
+            logger.debug(
+                "trip_update_no_valid_stop",
+                train_id=train_id,
+                reason="No valid stop_id found in stop_time_updates"
+            )
+            return
+        
+        # HOLOGRAPHIC POSITIONING: Convert stop_id to geographic coordinates
+        if not self.stop_registry or not self.stop_registry.is_available():
+            logger.debug(
+                "holographic_positioning_unavailable",
+                train_id=train_id,
+                stop_id=next_stop,
+                reason="Stop Registry not available - cannot infer position"
+            )
+            return
+        
+        stop_location = self.stop_registry.get_stop_location(next_stop)
+        
+        if not stop_location:
+            logger.debug(
+                "stop_not_found_in_registry",
+                train_id=train_id,
+                stop_id=next_stop,
+                reason="Stop ID not found in Stop Registry"
+            )
+            return
+        
+        latitude, longitude = stop_location
+        
+        logger.debug(
+            "holographic_positioning_success",
+            train_id=train_id,
+            stop_id=next_stop,
+            latitude=latitude,
+            longitude=longitude
+        )
+        
+        # Attempt Rail-Lock projection for track_distance (PK) and gradient
+        track_distance = None
+        gradient = None
+        
+        if self.topology and self.topology.is_available():
+            try:
+                rail_lock = self.topology.get_rail_lock(latitude, longitude, route_id)
+                
+                if rail_lock and rail_lock.cross_track_error < RAIL_LOCK_MAX_CROSS_TRACK_ERROR:
+                    track_distance = rail_lock.track_distance
+                    gradient = rail_lock.gradient
+                    
+                    logger.debug(
+                        "rail_lock_applied_from_trip_update",
+                        train_id=train_id,
+                        route_id=route_id,
+                        track_distance=track_distance,
+                        cross_track_error=rail_lock.cross_track_error,
+                        gradient_degrees=math.degrees(gradient) if gradient is not None else None,
+                        confidence=rail_lock.confidence
+                    )
+            except Exception as e:
+                logger.debug(
+                    "rail_lock_error_from_trip_update",
+                    train_id=train_id,
+                    error=str(e)
+                )
+        
+        # CRITICAL: Create train if it doesn't exist
+        if train_id not in self._trains:
+            # Train doesn't exist - CREATE IT NOW (this is the whole point!)
+            initial_state = TrainStateVector(
+                position=Position2D(
+                    latitude=latitude,
+                    longitude=longitude
+                ),
+                velocity=0.0,  # Assume stopped at station
+                acceleration=0.0,
+                bearing=0.0,  # Unknown bearing - will be updated later
+                track_distance=track_distance,
+                gradient=gradient
+            )
+            
+            self._trains[train_id] = TrainEntity(
+                train_id=train_id,
+                trip_id=trip_id,
+                route_id=route_id,
+                initial_state=initial_state,
+                route_type=data.get('route_type')
+            )
+            
+            if trip_id:
+                self._trip_to_train[trip_id] = train_id
+            
+            logger.info(
+                "train_created_from_trip_update",
+                train_id=train_id,
+                trip_id=trip_id,
+                route_id=route_id,
+                stop_id=next_stop,
+                method="holographic_positioning",
+                latitude=latitude,
+                longitude=longitude,
+                track_distance=track_distance
+            )
+        else:
+            # Train exists - update it with inferred position as virtual measurement
+            train = self._trains[train_id]
+            position = Position2D(
+                latitude=latitude,
+                longitude=longitude
+            )
+            
+            # Inject inferred position as "virtual measurement" into Kalman filter
+            # Since train is at a station, assume velocity is 0 (stopped)
+            train.update_from_measurement(
+                position=position,
+                velocity=0.0,  # Assume stopped at station
+                bearing=None,  # Keep existing bearing
+                track_distance=track_distance,
+                gradient=gradient
+            )
+            
+            logger.debug(
+                "train_updated_from_trip_update",
+                train_id=train_id,
+                stop_id=next_stop,
+                method="holographic_positioning",
+                latitude=latitude,
+                longitude=longitude,
+                track_distance=track_distance
+            )
             
     async def _simulation_loop(self) -> None:
         """Physics simulation loop."""
