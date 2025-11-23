@@ -22,9 +22,9 @@ import argparse
 import json
 import sys
 import zipfile
-from io import BytesIO, TextIOWrapper
+from io import TextIOWrapper
 from pathlib import Path
-from typing import Dict, List, Tuple, Optional
+from typing import Dict, List, Optional
 from collections import Counter
 
 import pandas as pd
