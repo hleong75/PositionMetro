@@ -272,7 +272,8 @@ class UnscentedKalmanFilter:
             diff = predicted_sigma_points[:, i] - self.state
             self.P += self.Wc[i] * np.outer(diff, diff)
             
-    def update(self, measurement: Optional[np.ndarray], apply_zupt: bool = False) -> None:
+    def update(self, measurement: Optional[np.ndarray], apply_zupt: bool = False, 
+               measured_acceleration: Optional[float] = None) -> None:
         """
         Update step: correct prediction with measurement.
         
@@ -281,12 +282,14 @@ class UnscentedKalmanFilter:
                         Can be None when apply_zupt is True.
             apply_zupt: Apply Zero Velocity Update (ZUPT) constraint for stopped trains.
                        When True, measurement is not used.
+            measured_acceleration: Measured acceleration (m/s²) from sensors, used to
+                                  dynamically adjust ZUPT covariance when train restarts.
         """
         n = len(self.state)
         
         # Apply ZUPT if requested (train is stopped)
         if apply_zupt:
-            self._apply_zupt()
+            self._apply_zupt(measured_acceleration=measured_acceleration)
             return
         
         # Generate sigma points from predicted state
@@ -319,28 +322,57 @@ class UnscentedKalmanFilter:
         # Update covariance
         self.P -= np.dot(K, np.dot(Pz, K.T))
     
-    def _apply_zupt(self) -> None:
+    def _apply_zupt(self, measured_acceleration: Optional[float] = None) -> None:
         """
         Apply Zero Velocity Update (ZUPT) constraint.
         
         When a train is stopped at a station, force velocity and acceleration to zero
         and reduce their covariance to prevent the filter from drifting due to inertia.
         This improves accuracy during station stops.
+        
+        V2 optimization: If the train is restarting (measured acceleration exceeds threshold),
+        dynamically increase velocity variance so the filter can quickly adapt to the new velocity.
+        
+        Args:
+            measured_acceleration: Measured acceleration from sensors (m/s²). If provided
+                                  and exceeds threshold, increases velocity variance for faster
+                                  adaptation when train restarts.
         """
         # Force velocity and acceleration to zero
         self.state[2] = 0.0  # velocity
         self.state[3] = 0.0  # acceleration
         
-        # Drastically reduce covariance for velocity and acceleration
-        # This tells the filter we're very confident these values are zero
-        self.P[2, 2] = 0.001  # velocity variance
-        self.P[3, 3] = 0.001  # acceleration variance
+        # Dynamic covariance adjustment based on measured acceleration
+        # If train is restarting (high acceleration while stopped), increase velocity variance
+        # to help filter adapt faster to the new velocity
+        acceleration_threshold = 0.5  # m/s² - threshold for detecting train restart
+        base_velocity_variance = 0.001
+        
+        if measured_acceleration is not None and abs(measured_acceleration) > acceleration_threshold:
+            # Train is restarting - increase velocity variance for faster adaptation
+            # Scale variance proportionally to measured acceleration
+            scale_factor = min(10.0, abs(measured_acceleration) / acceleration_threshold)
+            velocity_variance = base_velocity_variance * scale_factor
+            logger.debug(
+                "zupt_dynamic_covariance_adjustment",
+                measured_acceleration=measured_acceleration,
+                scale_factor=scale_factor,
+                velocity_variance=velocity_variance
+            )
+        else:
+            # Normal ZUPT - strong confidence that velocity is zero
+            velocity_variance = base_velocity_variance
         
         # Also reduce cross-covariances involving velocity and acceleration
+        # (but preserve diagonal values)
         self.P[2, :] *= 0.1
         self.P[:, 2] *= 0.1
         self.P[3, :] *= 0.1
         self.P[:, 3] *= 0.1
+        
+        # Set covariance for velocity and acceleration (after cross-covariance reduction)
+        self.P[2, 2] = velocity_variance  # velocity variance (dynamic)
+        self.P[3, 3] = 0.001  # acceleration variance (fixed)
         
     def _generate_sigma_points(self) -> np.ndarray:
         """Generate sigma points for UKF."""
@@ -496,7 +528,12 @@ class TrainEntity:
         The Davis equation models total resistance as:
         R = A + B*v + C*v² + m*g*sin(θ)
         
-        Where θ is the track gradient.
+        Where θ is the track gradient (slope).
+        
+        NOTE: Track gradient (state.gradient) should be provided by an external Map Matching
+        module using PostGIS to query the actual track gradient from digital elevation models.
+        Without gradient data, this defaults to 0.0 (flat track), which ignores uphill/downhill
+        effects in the physics simulation.
         
         Args:
             dt: Time step in seconds.
@@ -516,6 +553,7 @@ class TrainEntity:
         R_total = A + B * v + C * (v ** 2)
         
         # Gravitational component (gradient resistance)
+        # state.gradient should come from external Map Matching with PostGIS
         g = 9.81  # m/s²
         R_gravity = self.properties.mass * g * math.sin(state.gradient)
         
@@ -591,7 +629,8 @@ class TrainEntity:
         velocity: Optional[float],
         bearing: Optional[float],
         track_distance: Optional[float] = None,
-        gradient: Optional[float] = None
+        gradient: Optional[float] = None,
+        acceleration: Optional[float] = None
     ) -> None:
         """
         Update train state from real-time measurement (GTFS-RT data).
@@ -601,7 +640,11 @@ class TrainEntity:
             velocity: Measured velocity (m/s).
             bearing: Measured bearing (degrees).
             track_distance: Distance along track (PK) in meters.
-            gradient: Track gradient in radians.
+            gradient: Track gradient in radians. Should be provided by external Map Matching
+                     module with PostGIS to enable accurate gradient resistance in Davis equation.
+                     Without gradient data, the physics model will assume flat track (gradient=0).
+            acceleration: Measured acceleration from IMU sensors (m/s²). Used for dynamic
+                         ZUPT covariance adjustment when train restarts.
         """
         current_state = self.kalman.get_state_vector()
         
@@ -612,7 +655,8 @@ class TrainEntity:
         if is_stopped:
             # Apply Zero Velocity Update (ZUPT) constraint
             # This prevents filter drift when train is stopped at stations
-            self.kalman.update(None, apply_zupt=True)
+            # Pass measured acceleration for dynamic covariance adjustment
+            self.kalman.update(None, apply_zupt=True, measured_acceleration=acceleration)
             logger.debug(
                 "train_zupt_applied",
                 train_id=self.train_id,
@@ -624,7 +668,7 @@ class TrainEntity:
                 position.latitude,
                 position.longitude,
                 measured_velocity,
-                0.0,  # Acceleration not directly measured
+                acceleration if acceleration is not None else 0.0,  # Use measured acceleration if available
                 bearing if bearing is not None else current_state.bearing
             ])
             self.kalman.update(measurement)
@@ -634,6 +678,17 @@ class TrainEntity:
             self.track_distance = track_distance
         if gradient is not None:
             self.gradient = gradient
+        else:
+            # Log warning if gradient is not provided (once per train to avoid spam)
+            if not hasattr(self, '_gradient_warning_logged'):
+                logger.warning(
+                    "gradient_not_provided",
+                    train_id=self.train_id,
+                    message="Track gradient not provided. Davis physics will assume flat track. "
+                            "Consider integrating Map Matching module with PostGIS to provide "
+                            "accurate gradient data for improved physics simulation."
+                )
+                self._gradient_warning_logged = True
         
         # Update timestamp
         self.last_update = datetime.now()
