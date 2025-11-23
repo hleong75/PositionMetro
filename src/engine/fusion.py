@@ -1060,9 +1060,16 @@ class HybridFusionEngine:
         vehicle_id = data.get('vehicle_id')
         route_id = data.get('route_id')
         
-        # CRITICAL: Use vehicle_id if available, otherwise fall back to trip_id
-        # This handles cases where TripUpdate doesn't include vehicle_id
-        train_id = vehicle_id if vehicle_id else trip_id
+        # --- CORRECTION DOUBLONS (GHOST TRAIN FIX) ---
+        # 1. Si vehicle_id est présent, c'est la vérité terrain.
+        # 2. Si absent, on vérifie si on connait déjà le train associé à ce trip (mapping).
+        # 3. Sinon, on utilise le trip_id comme identifiant temporaire.
+        resolved_train_id = vehicle_id
+        if not resolved_train_id and trip_id:
+            resolved_train_id = self._trip_to_train.get(trip_id)
+            
+        train_id = resolved_train_id if resolved_train_id else trip_id
+        # ---------------------------------------------
         
         if not train_id:
             logger.debug(
@@ -1071,9 +1078,29 @@ class HybridFusionEngine:
             )
             return
         
-        # Maintain trip_id to train_id mapping
-        if trip_id and vehicle_id:
-            self._trip_to_train[trip_id] = vehicle_id
+        # CRITICAL: Handle train ID migration when vehicle_id appears later
+        # If we have a vehicle_id now, but a train exists under trip_id,
+        # we need to migrate the train to use the new vehicle_id
+        if vehicle_id and trip_id:
+            # Check if there's an existing train under trip_id that needs migration
+            if trip_id in self._trains and trip_id != vehicle_id:
+                # Migrate: move the train from trip_id to vehicle_id
+                train = self._trains.pop(trip_id)
+                train.train_id = vehicle_id  # Update the train's internal ID
+                self._trains[vehicle_id] = train
+                train_id = vehicle_id  # Update train_id for rest of function
+                
+                logger.info(
+                    "train_id_migrated",
+                    old_train_id=trip_id,
+                    new_train_id=vehicle_id,
+                    trip_id=trip_id,
+                    reason="vehicle_id appeared after initial creation with trip_id"
+                )
+        
+        # Force la mise à jour du mapping immédiatement
+        if trip_id and train_id:
+            self._trip_to_train[trip_id] = train_id
         
         # Extract stop_time_updates - these contain the upcoming stops
         stop_time_updates = data.get('stop_time_updates', [])

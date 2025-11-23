@@ -588,3 +588,169 @@ class TestZeroVelocityUpdate:
         state = train.get_current_state()
         assert abs(state.velocity) < 0.01
         assert train.current_state == TrainState.STOPPED
+
+
+class TestGhostTrainFix:
+    """Test ghost train duplicate prevention fix."""
+    
+    @pytest.mark.asyncio
+    async def test_trip_update_without_vehicle_id_then_with_vehicle_id_no_duplicate(self, tmp_path):
+        """
+        Test that when vehicle_id appears later, it updates the existing train
+        instead of creating a duplicate.
+        
+        Scenario:
+        1. First TripUpdate: trip_id='TRIP_X', vehicle_id=None → creates train 'TRIP_X'
+        2. Second TripUpdate: trip_id='TRIP_X', vehicle_id='VEH_X' → should update 'TRIP_X', not create 'VEH_X'
+        """
+        # Create stops file
+        stops_file = tmp_path / "stops.txt"
+        stops_file.write_text(
+            "stop_id,stop_name,stop_lat,stop_lon\n"
+            "STOP_A,Station A,48.8566,2.3522\n"
+            "STOP_B,Station B,48.8800,2.3550\n"
+        )
+        
+        engine = HybridFusionEngine(
+            kafka_bootstrap_servers="localhost:9092",
+            stops_path=str(stops_file)
+        )
+        
+        # First TripUpdate: no vehicle_id
+        trip_update_1 = {
+            'trip_id': 'TRIP_X',
+            # No vehicle_id!
+            'route_id': 'LINE_1',
+            'stop_time_updates': [
+                {'stop_id': 'STOP_A'}
+            ]
+        }
+        await engine._process_trip_update(trip_update_1)
+        
+        # Verify train was created with trip_id as identifier
+        assert 'TRIP_X' in engine._trains
+        assert len(engine.get_all_trains()) == 1
+        train_by_trip = engine.get_train('TRIP_X')
+        assert train_by_trip is not None
+        assert train_by_trip.train_id == 'TRIP_X'
+        
+        # Second TripUpdate: vehicle_id appears
+        trip_update_2 = {
+            'trip_id': 'TRIP_X',
+            'vehicle_id': 'VEH_X',
+            'route_id': 'LINE_1',
+            'stop_time_updates': [
+                {'stop_id': 'STOP_B'}
+            ]
+        }
+        await engine._process_trip_update(trip_update_2)
+        
+        # CRITICAL: Should still have only 1 train (no duplicate)
+        assert len(engine.get_all_trains()) == 1, "Ghost train detected! Duplicate train created."
+        
+        # The train should now be accessible by vehicle_id
+        assert 'VEH_X' in engine._trains
+        train_by_vehicle = engine.get_train('VEH_X')
+        assert train_by_vehicle is not None
+        
+        # Should be the SAME train object (not a duplicate)
+        assert train_by_vehicle.train_id == 'VEH_X'
+        
+        # Mapping should be updated
+        assert 'TRIP_X' in engine._trip_to_train
+        assert engine._trip_to_train['TRIP_X'] == 'VEH_X'
+        
+        # Old identifier should be removed
+        assert 'TRIP_X' not in engine._trains or engine._trains['TRIP_X'].train_id == 'VEH_X'
+    
+    @pytest.mark.asyncio
+    async def test_trip_update_with_vehicle_id_from_start(self, tmp_path):
+        """
+        Test that when vehicle_id is present from the start, it works normally.
+        """
+        # Create stops file
+        stops_file = tmp_path / "stops.txt"
+        stops_file.write_text(
+            "stop_id,stop_name,stop_lat,stop_lon\n"
+            "STOP_A,Station A,48.8566,2.3522\n"
+        )
+        
+        engine = HybridFusionEngine(
+            kafka_bootstrap_servers="localhost:9092",
+            stops_path=str(stops_file)
+        )
+        
+        # TripUpdate with vehicle_id from start
+        trip_update = {
+            'trip_id': 'TRIP_Y',
+            'vehicle_id': 'VEH_Y',
+            'route_id': 'LINE_2',
+            'stop_time_updates': [
+                {'stop_id': 'STOP_A'}
+            ]
+        }
+        await engine._process_trip_update(trip_update)
+        
+        # Verify train was created with vehicle_id as identifier
+        assert 'VEH_Y' in engine._trains
+        assert len(engine.get_all_trains()) == 1
+        train = engine.get_train('VEH_Y')
+        assert train is not None
+        assert train.train_id == 'VEH_Y'
+        assert train.trip_id == 'TRIP_Y'
+        
+        # Mapping should be established
+        assert 'TRIP_Y' in engine._trip_to_train
+        assert engine._trip_to_train['TRIP_Y'] == 'VEH_Y'
+    
+    @pytest.mark.asyncio
+    async def test_trip_update_resolves_from_mapping(self, tmp_path):
+        """
+        Test that when vehicle_id is absent, but we have a mapping from a previous update,
+        it uses the mapped vehicle_id instead of creating a duplicate.
+        """
+        # Create stops file
+        stops_file = tmp_path / "stops.txt"
+        stops_file.write_text(
+            "stop_id,stop_name,stop_lat,stop_lon\n"
+            "STOP_A,Station A,48.8566,2.3522\n"
+            "STOP_B,Station B,48.8800,2.3550\n"
+        )
+        
+        engine = HybridFusionEngine(
+            kafka_bootstrap_servers="localhost:9092",
+            stops_path=str(stops_file)
+        )
+        
+        # First TripUpdate: with vehicle_id
+        trip_update_1 = {
+            'trip_id': 'TRIP_Z',
+            'vehicle_id': 'VEH_Z',
+            'route_id': 'LINE_3',
+            'stop_time_updates': [
+                {'stop_id': 'STOP_A'}
+            ]
+        }
+        await engine._process_trip_update(trip_update_1)
+        
+        assert 'VEH_Z' in engine._trains
+        assert len(engine.get_all_trains()) == 1
+        
+        # Second TripUpdate: vehicle_id is missing this time
+        trip_update_2 = {
+            'trip_id': 'TRIP_Z',
+            # No vehicle_id!
+            'route_id': 'LINE_3',
+            'stop_time_updates': [
+                {'stop_id': 'STOP_B'}
+            ]
+        }
+        await engine._process_trip_update(trip_update_2)
+        
+        # Should still have only 1 train (should resolve via mapping)
+        assert len(engine.get_all_trains()) == 1, "Duplicate train created when resolving via mapping"
+        
+        # Train should still be accessible by vehicle_id
+        train = engine.get_train('VEH_Z')
+        assert train is not None
+        assert train.train_id == 'VEH_Z'
