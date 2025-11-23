@@ -474,6 +474,9 @@ class GTFSRTHarvester:
         )
         
         while self._active:
+            # Record cycle start time for accurate interval timing
+            cycle_start = datetime.now()
+            
             # Harvest all resources concurrently
             tasks = [
                 self.harvest_resource(resource)
@@ -482,17 +485,33 @@ class GTFSRTHarvester:
             
             results = await asyncio.gather(*tasks, return_exceptions=True)
             
+            # Calculate processing time
+            cycle_end = datetime.now()
+            processing_time = (cycle_end - cycle_start).total_seconds()
+            
             # Log summary
             successful = sum(1 for r in results if isinstance(r, HarvestMetrics) and r.status == FeedStatus.ACTIVE)
             logger.info(
                 "harvester_cycle_completed",
                 total=len(resources),
                 successful=successful,
-                failed=len(resources) - successful
+                failed=len(resources) - successful,
+                processing_time=processing_time
             )
             
-            # Wait before next cycle
-            await asyncio.sleep(interval)
+            # Calculate dynamic sleep time to maintain exact interval
+            # This prevents temporal drift where processing time accumulates
+            sleep_time = max(0, interval - processing_time)
+            
+            if sleep_time > 0:
+                await asyncio.sleep(sleep_time)
+            else:
+                logger.warning(
+                    "harvester_cycle_overrun",
+                    processing_time=processing_time,
+                    interval=interval,
+                    overrun=processing_time - interval
+                )
 
 
 async def main() -> None:
