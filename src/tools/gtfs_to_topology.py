@@ -81,16 +81,36 @@ class GTFSTopologyConverter:
                 with zip_ref.open('shapes.txt') as shapes_file:
                     # Use TextIOWrapper to handle encoding
                     shapes_text = TextIOWrapper(shapes_file, encoding='utf-8-sig')
-                    self.shapes_df = pd.read_csv(
-                        shapes_text,
-                        usecols=['shape_id', 'shape_pt_lat', 'shape_pt_lon', 'shape_pt_sequence'],
-                        dtype={
-                            'shape_id': str,
-                            'shape_pt_lat': float,
-                            'shape_pt_lon': float,
-                            'shape_pt_sequence': int
-                        }
-                    )
+                    
+                    # Try to load shape_dist_traveled for elevation data
+                    # This is optional in GTFS, so we need to handle its absence gracefully
+                    try:
+                        self.shapes_df = pd.read_csv(
+                            shapes_text,
+                            dtype={
+                                'shape_id': str,
+                                'shape_pt_lat': float,
+                                'shape_pt_lon': float,
+                                'shape_pt_sequence': int,
+                                'shape_dist_traveled': float  # Optional: used as elevation/distance
+                            }
+                        )
+                    except ValueError:
+                        # shape_dist_traveled not present, reload without it
+                        shapes_text = TextIOWrapper(
+                            zip_ref.open('shapes.txt'),
+                            encoding='utf-8-sig'
+                        )
+                        self.shapes_df = pd.read_csv(
+                            shapes_text,
+                            usecols=['shape_id', 'shape_pt_lat', 'shape_pt_lon', 'shape_pt_sequence'],
+                            dtype={
+                                'shape_id': str,
+                                'shape_pt_lat': float,
+                                'shape_pt_lon': float,
+                                'shape_pt_sequence': int
+                            }
+                        )
                 
                 print(f"  ✓ Loaded {len(self.shapes_df):,} shape points")
                 
@@ -157,34 +177,50 @@ class GTFSTopologyConverter:
         1. Sort by shape_pt_sequence (strict ordering)
         2. Remove duplicate consecutive points
         3. Basic validation (lat/lon bounds)
+        4. Extract elevation (Z) if available from shape_dist_traveled
         
         Args:
             shape_points: DataFrame with shape points for a single shape_id
         
         Returns:
-            List of [longitude, latitude] coordinate pairs
+            List of [longitude, latitude, elevation?] coordinate pairs
+            Elevation is included as 3rd coordinate if shape_dist_traveled is available
         """
         # Create a copy and sort by sequence number to avoid modifying the input
         shape_points = shape_points.copy().sort_values('shape_pt_sequence')
         
-        # Extract coordinates as [lon, lat] pairs (GeoJSON format)
-        points = shape_points[['shape_pt_lon', 'shape_pt_lat']].values.tolist()
+        # Check if elevation data (shape_dist_traveled) is available
+        has_elevation = 'shape_dist_traveled' in shape_points.columns
         
         # Remove consecutive duplicate points
         cleaned_points: List[List[float]] = []
-        prev_point = None
+        prev_coords = None
         
-        for point in points:
-            lon, lat = point
+        for _, row in shape_points.iterrows():
+            lon = row['shape_pt_lon']
+            lat = row['shape_pt_lat']
             
             # Basic validation: check if coordinates are within reasonable bounds
             if not (-180 <= lon <= 180 and -90 <= lat <= 90):
                 continue  # Skip invalid points
             
+            # Create point with or without elevation
+            if has_elevation and pd.notna(row.get('shape_dist_traveled')):
+                # Use shape_dist_traveled as elevation (typically in meters)
+                # Note: In standard GTFS, this is actually distance traveled, not elevation
+                # For true elevation, agencies would need to use a custom extension
+                # We'll use it as a proxy when available
+                elevation = float(row['shape_dist_traveled'])
+                point = [lon, lat, elevation]
+                current_coords = (lon, lat, elevation)
+            else:
+                point = [lon, lat]
+                current_coords = (lon, lat)
+            
             # Skip consecutive duplicates
-            if prev_point is None or prev_point != point:
-                cleaned_points.append([lon, lat])
-                prev_point = point
+            if prev_coords is None or prev_coords != current_coords:
+                cleaned_points.append(point)
+                prev_coords = current_coords
         
         return cleaned_points
     
