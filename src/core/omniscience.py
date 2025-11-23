@@ -244,7 +244,12 @@ class OmniscienceEngine:
             # 3. Check mime_type field if available
             if not is_gtfs_rt:
                 mime_type = resource.get("mime", "").lower()
-                is_gtfs_rt = "protobuf" in mime_type or "octet-stream" in mime_type
+                # Use specific MIME types to avoid false positives
+                is_gtfs_rt = mime_type in [
+                    "application/x-protobuf",
+                    "application/octet-stream",
+                    "application/vnd.google.protobuf"
+                ]
             
             # 4. If still uncertain, check actual content-type header
             if not is_gtfs_rt:

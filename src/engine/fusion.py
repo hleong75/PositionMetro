@@ -13,7 +13,7 @@ import asyncio
 import json
 import logging
 import math
-from typing import Dict, List, Optional, Tuple, Any
+from typing import Dict, List, Optional, Tuple, Any, Set
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
@@ -92,7 +92,8 @@ def get_davis_coefficients_for_route_type(route_type: Optional[int]) -> DavisCoe
     
     elif route_type in [5, 6, 7]:
         # Cable/Gondola/Funicular: Very different physics
-        # Simplified coefficients
+        # Lower resistance due to cable-driven motion (no wheels on rails)
+        # Minimal aerodynamic drag due to low speeds
         return DavisCoefficients(A=2.0, B=0.01, C=0.0005)
     
     else:
@@ -688,6 +689,7 @@ class HybridFusionEngine:
         self._consumer: Optional[AIOKafkaConsumer] = None
         self._trains: Dict[str, TrainEntity] = {}
         self._trip_to_train: Dict[str, str] = {}  # trip_id -> train_id mapping
+        self._warned_routes: Set[str] = set()  # Track which routes we've warned about
         
         self._active = False
         self._simulation_rate = 1.0  # Hz
@@ -864,11 +866,14 @@ class HybridFusionEngine:
             else:
                 # Fallback to lat/lon sorting with warning
                 # CRITICAL: This is unsafe for routes with loops or U-turns
-                logger.warning(
-                    "moving_block_fallback_to_latlon",
-                    route_id=route_id,
-                    reason="track_distance not available for all trains on route"
-                )
+                # Only log warning once per route to avoid log spam
+                if route_id not in self._warned_routes:
+                    logger.warning(
+                        "moving_block_fallback_to_latlon",
+                        route_id=route_id,
+                        reason="track_distance not available for all trains on route"
+                    )
+                    self._warned_routes.add(route_id)
                 route_trains.sort(
                     key=lambda t: (
                         t.get_current_state().position.latitude +

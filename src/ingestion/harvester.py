@@ -501,17 +501,18 @@ class GTFSRTHarvester:
             
             # Calculate dynamic sleep time to maintain exact interval
             # This prevents temporal drift where processing time accumulates
-            sleep_time = max(0, interval - processing_time)
+            # Use minimum 1ms sleep to prevent CPU spinning
+            sleep_time = max(0.001, interval - processing_time)
             
-            if sleep_time > 0:
-                await asyncio.sleep(sleep_time)
-            else:
+            if processing_time >= interval:
                 logger.warning(
                     "harvester_cycle_overrun",
                     processing_time=processing_time,
                     interval=interval,
                     overrun=processing_time - interval
                 )
+            
+            await asyncio.sleep(sleep_time)
 
 
 async def main() -> None:

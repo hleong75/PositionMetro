@@ -119,11 +119,11 @@ class TestHarvesterTimingFix:
         
         async def mock_sleep(duration):
             sleep_times.append(duration)
-            # Stop after first sleep to avoid infinite loop
-            if len(sleep_times) >= 1:
-                return
-            # Use original sleep for actual waiting
+            # Use original sleep for actual waiting but stop after first cycle
             await original_sleep(0.01)
+            if len(sleep_times) >= 1:
+                # Deactivate harvester after first cycle to stop loop
+                harvester._active = False
         
         # Create harvester with mocked methods
         harvester = GTFSRTHarvester()
@@ -155,9 +155,6 @@ class TestHarvesterTimingFix:
                 try:
                     await asyncio.wait_for(task, timeout=2.0)
                 except (asyncio.TimeoutError, asyncio.CancelledError):
-                    pass
-                finally:
-                    harvester._active = False
                     task.cancel()
             
             # Check that sleep time was calculated (should be close to interval - processing_time)
