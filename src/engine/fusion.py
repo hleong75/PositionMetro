@@ -27,6 +27,9 @@ from aiokafka.errors import KafkaError
 
 logger = structlog.get_logger(__name__)
 
+# HNPS v6.0: Rail-Lock configuration
+RAIL_LOCK_MAX_CROSS_TRACK_ERROR = 50.0  # meters - maximum acceptable error for Rail-Lock
+
 
 class TrainState(Enum):
     """Train operational states."""
@@ -933,7 +936,7 @@ class HybridFusionEngine:
             try:
                 rail_lock = self.topology.get_rail_lock(latitude, longitude, route_id)
                 
-                if rail_lock and rail_lock.cross_track_error < 50.0:
+                if rail_lock and rail_lock.cross_track_error < RAIL_LOCK_MAX_CROSS_TRACK_ERROR:
                     # Rail-Lock successful with acceptable error
                     track_distance = rail_lock.track_distance
                     gradient = rail_lock.gradient
@@ -954,7 +957,7 @@ class HybridFusionEngine:
                         vehicle_id=vehicle_id,
                         route_id=route_id,
                         cross_track_error=rail_lock.cross_track_error,
-                        reason="cross_track_error exceeds 50m threshold"
+                        reason=f"cross_track_error exceeds {RAIL_LOCK_MAX_CROSS_TRACK_ERROR}m threshold"
                     )
             except Exception as e:
                 # Silently handle Rail-Lock errors - don't crash the fusion loop

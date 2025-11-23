@@ -33,6 +33,9 @@ from shapely.ops import nearest_points
 
 logger = structlog.get_logger(__name__)
 
+# Constants for Rail-Lock confidence calculation
+MAX_CROSS_TRACK_ERROR_FOR_CONFIDENCE = 100.0  # meters - confidence drops to 0 at this distance
+
 
 @dataclass
 class RailProjection:
@@ -274,8 +277,8 @@ class TopologyEngine:
                     gradient = self._calculate_gradient(shape_id, track_distance, line)
                     
                     # Calculate confidence (higher confidence for closer matches)
-                    # Confidence drops to 0 at 100m cross-track error
-                    confidence = max(0.0, 1.0 - (distance / 100.0))
+                    # Confidence drops to 0 at MAX_CROSS_TRACK_ERROR_FOR_CONFIDENCE
+                    confidence = max(0.0, 1.0 - (distance / MAX_CROSS_TRACK_ERROR_FOR_CONFIDENCE))
                     
                     best_projection = RailProjection(
                         track_distance=track_distance,
@@ -394,6 +397,7 @@ class TopologyEngine:
 # Example usage and testing
 if __name__ == "__main__":
     import sys
+    import logging
     
     # Configure logging
     structlog.configure(

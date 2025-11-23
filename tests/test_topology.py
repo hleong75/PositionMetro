@@ -112,12 +112,14 @@ class TestTopologyEngine:
     
     def test_load_topology_invalid_json(self, tmp_path: Path):
         """Test error handling for invalid JSON."""
+        import json as json_module
+        
         invalid_json = tmp_path / "invalid.json"
         invalid_json.write_text("not valid json")
         
         engine = TopologyEngine()
         
-        with pytest.raises(Exception):
+        with pytest.raises((json_module.JSONDecodeError, ValueError)):
             engine.load_topology(str(invalid_json))
     
     def test_load_topology_invalid_structure(self, tmp_path: Path):

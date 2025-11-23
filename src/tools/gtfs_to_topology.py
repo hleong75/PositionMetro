@@ -185,6 +185,13 @@ class GTFSTopologyConverter:
         Returns:
             List of [longitude, latitude, elevation?] coordinate pairs
             Elevation is included as 3rd coordinate if shape_dist_traveled is available
+            
+        Note:
+            LIMITATION: In standard GTFS, shape_dist_traveled represents distance traveled
+            along the shape (not elevation). This converter uses it as a proxy for elevation
+            when available. For accurate gradient calculations, GTFS feeds should be extended
+            with true elevation data (e.g., via a custom field or external DEM lookup).
+            Without proper elevation data, gradient calculations will be inaccurate or default to 0.
         """
         # Create a copy and sort by sequence number to avoid modifying the input
         shape_points = shape_points.copy().sort_values('shape_pt_sequence')
@@ -206,10 +213,11 @@ class GTFSTopologyConverter:
             
             # Create point with or without elevation
             if has_elevation and pd.notna(row.get('shape_dist_traveled')):
-                # Use shape_dist_traveled as elevation (typically in meters)
-                # Note: In standard GTFS, this is actually distance traveled, not elevation
-                # For true elevation, agencies would need to use a custom extension
-                # We'll use it as a proxy when available
+                # LIMITATION WARNING: Using shape_dist_traveled as elevation proxy
+                # In standard GTFS, shape_dist_traveled is cumulative distance, not elevation
+                # This will produce INCORRECT gradients unless the GTFS feed uses a custom
+                # extension to store true elevation data in this field
+                # TODO: Consider integrating with external DEM (Digital Elevation Model) data
                 elevation = float(row['shape_dist_traveled'])
                 point = [lon, lat, elevation]
                 current_coords = (lon, lat, elevation)
