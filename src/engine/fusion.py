@@ -10,6 +10,7 @@ HNPS v5.0 Component: Physics Simulation & State Estimation
 """
 
 import asyncio
+import json
 import logging
 import math
 from typing import Dict, List, Optional, Tuple, Any
@@ -686,7 +687,6 @@ class HybridFusionEngine:
                     break
                     
                 try:
-                    import json
                     data = json.loads(message.value)
                     await self._process_message(data)
                 except Exception as e:
