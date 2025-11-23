@@ -34,6 +34,9 @@ from src.tools.gtfs_to_topology import GTFSTopologyConverter
 
 
 # Default GTFS IDFM URL (Île-de-France Mobilités)
+# NOTE: This URL contains a file hash that may change over time.
+# If the download fails, check the IDFM open data portal for the latest URL:
+# https://data.iledefrance-mobilites.fr/explore/dataset/offre-horaires-tc-gtfs-idfm/
 DEFAULT_GTFS_URL = "https://data.iledefrance-mobilites.fr/explore/dataset/offre-horaires-tc-gtfs-idfm/files/b80a5a8f7e1c4e1e8e82e7e3d32c0a0c/download/"
 
 # Output paths
@@ -57,7 +60,8 @@ class DataPreparationTool:
         source: str,
         output_dir: Path = DEFAULT_OUTPUT_DIR,
         stops_output: Optional[Path] = None,
-        topology_output: Optional[Path] = None
+        topology_output: Optional[Path] = None,
+        download_timeout: int = 300
     ):
         """
         Initialize the data preparation tool.
@@ -67,9 +71,11 @@ class DataPreparationTool:
             output_dir: Output directory for generated files.
             stops_output: Path for stops.txt output (overrides output_dir).
             topology_output: Path for topology.json output (overrides output_dir).
+            download_timeout: Timeout in seconds for HTTP downloads (default: 300).
         """
         self.source = source
         self.output_dir = output_dir
+        self.download_timeout = download_timeout
         
         # Set output paths
         self.stops_output = stops_output or (output_dir / "stops.txt")
@@ -99,7 +105,7 @@ class DataPreparationTool:
         self.logger.info(f"📥 Downloading GTFS from {self.source}...")
         
         try:
-            response = requests.get(self.source, stream=True, timeout=300)
+            response = requests.get(self.source, stream=True, timeout=self.download_timeout)
             response.raise_for_status()
             
             # Save to temporary file in output directory
@@ -108,6 +114,7 @@ class DataPreparationTool:
             
             total_size = int(response.headers.get('content-length', 0))
             downloaded = 0
+            last_logged_mb = 0
             
             with open(temp_zip, 'wb') as f:
                 for chunk in response.iter_content(chunk_size=8192):
@@ -115,8 +122,10 @@ class DataPreparationTool:
                         f.write(chunk)
                         downloaded += len(chunk)
                         
-                        # Log progress every 10MB
-                        if downloaded % (10 * 1024 * 1024) == 0:
+                        # Log progress every 10MB (using integer division to avoid missing final update)
+                        current_mb = downloaded // (10 * 1024 * 1024)
+                        if current_mb > last_logged_mb:
+                            last_logged_mb = current_mb
                             if total_size > 0:
                                 progress = (downloaded / total_size) * 100
                                 self.logger.info(f"  Progress: {progress:.1f}% ({downloaded / (1024*1024):.1f} MB)")
@@ -176,14 +185,13 @@ class DataPreparationTool:
                 if 'stops.txt' not in zip_ref.namelist():
                     raise KeyError("stops.txt not found in GTFS ZIP file")
                 
-                # Extract stops.txt
+                # Extract stops.txt directly to target location
                 self.stops_output.parent.mkdir(parents=True, exist_ok=True)
-                zip_ref.extract('stops.txt', path=self.stops_output.parent)
                 
-                # Rename if extracted to wrong location (some zips have directory structure)
-                extracted_stops = self.stops_output.parent / 'stops.txt'
-                if extracted_stops != self.stops_output and extracted_stops.exists():
-                    extracted_stops.rename(self.stops_output)
+                # Read stops.txt from ZIP and write to output path
+                # This avoids issues with different directory structures in ZIP files
+                with zip_ref.open('stops.txt') as stops_file:
+                    self.stops_output.write_bytes(stops_file.read())
                 
                 # Get file size
                 file_size_kb = self.stops_output.stat().st_size / 1024
@@ -353,6 +361,12 @@ Requirements:
     
     # Other options
     parser.add_argument(
+        '--timeout',
+        type=int,
+        default=300,
+        help='Download timeout in seconds (default: 300, increase for large files on slow connections)'
+    )
+    parser.add_argument(
         '-v', '--verbose',
         action='store_true',
         help='Enable verbose logging'
@@ -390,7 +404,8 @@ Requirements:
             source=source,
             output_dir=args.output_dir,
             stops_output=args.stops_output,
-            topology_output=args.topology_output
+            topology_output=args.topology_output,
+            download_timeout=args.timeout
         )
         
         tool.prepare()

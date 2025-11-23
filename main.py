@@ -110,6 +110,10 @@ class PanoptiqueFerroviaire:
             'fusion': {
                 'simulation_rate': 1.0
             },
+            'static_data': {
+                'topology_path': 'data/topology.json',
+                'stops_path': 'data/stops.txt'
+            },
             'logging': {
                 'level': 'INFO'
             },
@@ -205,9 +209,10 @@ class PanoptiqueFerroviaire:
         
         kafka_config = self.config.get('kafka', {})
         
-        # Define paths for static data files
-        topology_path = "data/topology.json"
-        stops_path = "data/stops.txt"
+        # Get static data file paths from config or use defaults
+        static_data_config = self.config.get('static_data', {})
+        topology_path = static_data_config.get('topology_path', 'data/topology.json')
+        stops_path = static_data_config.get('stops_path', 'data/stops.txt')
         
         # Check existence of static data files
         if not os.path.exists(topology_path):
