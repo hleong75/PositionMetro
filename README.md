@@ -51,8 +51,35 @@ Panoptique Ferroviaire is an industrial-grade system implementing advanced conce
 
 ### Prerequisites
 
-- Docker & Docker Compose
-- Python 3.12+ (for local development)
+- Docker & Docker Compose (for full mode)
+- Python 3.12+ (for standalone or development)
+
+### Option 1: Mode Autonome (Sans Docker) ⚡
+
+Pour exécuter rapidement sans installer Docker, Kafka ou PostgreSQL:
+
+```bash
+# Cloner le dépôt
+git clone <repository-url>
+cd PositionMetro
+
+# Créer un environnement virtuel
+python3.12 -m venv venv
+source venv/bin/activate  # Linux/Mac
+
+# Installer les dépendances
+pip install -r requirements.txt
+
+# Préparer les données statiques (optionnel)
+python -m src.tools.prepare_data
+
+# Lancer en mode autonome
+python main_standalone.py
+```
+
+👉 Voir **[README_SANS_DOCKER.md](README_SANS_DOCKER.md)** pour plus de détails.
+
+### Option 2: Mode Complet (Avec Docker)
 
 ### 1. Prepare Static Data (v6.0 - Required for Rail-Lock)
 
