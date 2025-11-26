@@ -1343,6 +1343,44 @@ class HybridFusionEngine:
         """Get all active trains."""
         return list(self._trains.values())
 
+    def initialize_standalone_mode(self) -> None:
+        """
+        Initialize the fusion engine for standalone mode (without Kafka).
+        
+        This method sets up the engine to run without a Kafka consumer,
+        useful for testing, demos, or running without infrastructure.
+        """
+        self._active = True
+        logger.info("fusion_engine_standalone_mode_initialized")
+
+    async def run_simulation_step(self, dt: float) -> None:
+        """
+        Run a single simulation step.
+        
+        This method is useful for standalone mode where you want to control
+        the simulation loop externally.
+        
+        Args:
+            dt: Time step in seconds.
+        """
+        if not self._active:
+            return
+            
+        # Predict all trains forward
+        for train in self._trains.values():
+            train.predict(dt)
+            
+        # Update moving block relationships
+        self._update_moving_blocks()
+
+    def is_active(self) -> bool:
+        """Check if the fusion engine is active."""
+        return self._active
+
+    def deactivate(self) -> None:
+        """Deactivate the fusion engine."""
+        self._active = False
+
 
 async def main() -> None:
     """Demo/test function for the Fusion Engine."""

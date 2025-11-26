@@ -221,6 +221,22 @@ class GTFSRTHarvester:
             await self._producer.stop()
             
         logger.info("harvester_stopped")
+
+    async def start_standalone(self) -> None:
+        """
+        Start the harvester in standalone mode (without Kafka).
+        
+        This initializes only the HTTP session for fetching feeds,
+        without attempting to connect to Kafka.
+        """
+        self._session = aiohttp.ClientSession()
+        self._own_session = True
+        self._active = True
+        logger.info("harvester_started_standalone_mode")
+
+    def is_active(self) -> bool:
+        """Check if the harvester is active."""
+        return self._active
         
     async def harvest_resource(
         self,

@@ -251,13 +251,8 @@ class PanoptiqueStandalone:
         max_pages = self.config.get('standalone', {}).get('max_discovery_pages', 5)
         
         async with self.omniscience:
-            # Limited discovery for standalone mode
-            page = 1
-            while page <= max_pages:
-                resources_found = await self.omniscience._fetch_page(page)
-                if resources_found == 0:
-                    break
-                page += 1
+            # Use the public method for limited discovery
+            await self.omniscience.discover_feeds_limited(max_pages)
             
             operators = self.omniscience.get_all_operators()
             self._discovered_resources = self.omniscience.get_all_resources()
@@ -296,17 +291,17 @@ class PanoptiqueStandalone:
             print(f"   ✓ Stops chargés: {stops_path}")
         
         # Initialize fusion engine without Kafka connection
-        # We pass a dummy Kafka address that won't be used
+        # We pass a dummy Kafka address that won't be used in standalone mode
         self.fusion_engine = HybridFusionEngine(
-            kafka_bootstrap_servers="standalone:9092",  # Won't connect
+            kafka_bootstrap_servers="standalone:9092",  # Not used in standalone mode
             kafka_topic="standalone_topic",
             kafka_group_id="standalone_group",
             topology_path=topology_path if os.path.exists(topology_path) else None,
             stops_path=stops_path if os.path.exists(stops_path) else None
         )
         
-        # Don't start Kafka consumer, just initialize the engine
-        self.fusion_engine._active = True
+        # Use the public method to initialize standalone mode
+        self.fusion_engine.initialize_standalone_mode()
         
         # Start simulation loop only
         asyncio.create_task(self._simulation_loop())
@@ -328,16 +323,13 @@ class PanoptiqueStandalone:
         
         # Create harvester without Kafka
         self.harvester = GTFSRTHarvester(
-            kafka_bootstrap_servers="standalone:9092",  # Won't connect
+            kafka_bootstrap_servers="standalone:9092",  # Not used in standalone mode
             kafka_topic="standalone_topic",
             on_metrics=self._on_harvest_metrics
         )
         
-        # Initialize session only (no Kafka producer)
-        import aiohttp
-        self.harvester._session = aiohttp.ClientSession()
-        self.harvester._own_session = True
-        self.harvester._active = True
+        # Use the public method to start in standalone mode
+        await self.harvester.start_standalone()
         
         # Limit resources for standalone mode
         max_resources = min(len(self._discovered_resources), 20)
@@ -414,13 +406,13 @@ class PanoptiqueStandalone:
         
         dt = 1.0 / self.config.get('fusion', {}).get('simulation_rate', 1.0)
         
-        while self._running and self.fusion_engine:
+        while self._running and self.fusion_engine and self.fusion_engine.is_active():
             try:
-                # Predict all trains forward
-                for train in self.fusion_engine._trains.values():
-                    train.predict(dt)
-                    
-                    # Store state in memory
+                # Use the public method to run simulation step
+                await self.fusion_engine.run_simulation_step(dt)
+                
+                # Store state in memory for all trains
+                for train in self.fusion_engine.get_all_trains():
                     state = train.get_current_state()
                     self.data_store.update_train(train.train_id, {
                         'latitude': state.position.latitude,
@@ -431,9 +423,6 @@ class PanoptiqueStandalone:
                         'track_distance': state.track_distance,
                         'state': train.current_state.value
                     })
-                    
-                # Update moving block relationships
-                self.fusion_engine._update_moving_blocks()
                 
                 await asyncio.sleep(dt)
                 
@@ -453,11 +442,11 @@ class PanoptiqueStandalone:
             task.cancel()
             
         # Stop subsystems
-        if self.harvester and self.harvester._session:
-            await self.harvester._session.close()
+        if self.harvester:
+            await self.harvester.stop()
             
         if self.fusion_engine:
-            self.fusion_engine._active = False
+            self.fusion_engine.deactivate()
             
         self.logger.info("panoptique_standalone_stopped")
         print("✓ Système arrêté proprement\n")
