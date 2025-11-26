@@ -1,4 +1,4 @@
-# 🚂 Panoptique Ferroviaire - HNPS v5.0
+# 🚂 Panoptique Ferroviaire - HNPS v6.0
 
 **Hybrid Neuro-Physical System for Railway Surveillance**
 
@@ -12,6 +12,8 @@ Panoptique Ferroviaire is an industrial-grade system implementing advanced conce
 - **High-Performance Harvester**: Asynchronous ingestion of Protocol Buffer feeds
 - **Hybrid Neuro-Physics Engine**: Combines Davis equation physics with Unscented Kalman Filtering
 - **Moving Block System**: Cantonnement collision prevention logic
+- **Rail-Lock Engine (v6.0)**: Absolute spatial awareness with track geometry projection
+- **Holographic Positioning (v5.0)**: GPS-less positioning from station arrival times
 
 ## 🏗️ Architecture
 
@@ -52,7 +54,24 @@ Panoptique Ferroviaire is an industrial-grade system implementing advanced conce
 - Docker & Docker Compose
 - Python 3.12+ (for local development)
 
-### Launch the System
+### 1. Prepare Static Data (v6.0 - Required for Rail-Lock)
+
+```bash
+# Download and prepare GTFS static data
+python -m src.tools.prepare_data
+
+# Or use a local GTFS file
+python -m src.tools.prepare_data --local /path/to/gtfs.zip
+
+# Or specify a custom URL
+python -m src.tools.prepare_data --url https://example.com/gtfs.zip
+```
+
+This generates:
+- `data/stops.txt` - Station locations for Holographic Positioning
+- `data/topology.json` - Route geometries for Rail-Lock spatial awareness
+
+### 2. Launch the System
 
 ```bash
 # Clone the repository
@@ -70,7 +89,8 @@ The system will:
 1. Auto-discover all French GTFS-RT feeds
 2. Start harvesting real-time data
 3. Simulate train physics and maintain state
-4. Store data in PostGIS database
+4. Apply Rail-Lock projection for absolute spatial awareness
+5. Store data in PostGIS database
 
 ### Access Points
 
@@ -78,6 +98,31 @@ The system will:
 - **PostgreSQL**: localhost:5432 (Database: panoptique, User: panoptique)
 
 ## 📦 Components
+
+### Module 0: Data Preparation Tool (v6.0)
+**File**: `src/tools/prepare_data.py`
+
+Automated static data acquisition:
+- Downloads GTFS ZIP from URL or reads local file
+- Extracts `stops.txt` for Holographic Positioning
+- Generates `topology.json` for Rail-Lock engine
+- Crosses `shapes.txt` and `trips.txt` to map routes to geometries
+- Production-ready with comprehensive error handling
+
+**Usage**:
+```bash
+# Default (IDFM)
+python -m src.tools.prepare_data
+
+# Local file
+python -m src.tools.prepare_data --local gtfs.zip
+
+# Custom URL
+python -m src.tools.prepare_data --url https://example.com/gtfs.zip
+
+# Custom output directory
+python -m src.tools.prepare_data --output-dir /custom/data
+```
 
 ### Module A: Omniscience Engine
 **File**: `src/core/omniscience.py`
@@ -132,6 +177,21 @@ Collision prevention:
 - Enforces safe distance (default 500m)
 - Applies emergency braking when needed
 - Considers relative velocities
+
+#### 4. Rail-Lock Engine (v6.0)
+Absolute spatial awareness:
+- Projects GPS coordinates onto track geometry
+- Calculates curvilinear distance (PK - Point Kilométrique)
+- Extracts track gradient for physics simulation
+- Enables accurate train ordering for Cantonnement
+- Supports loops and U-turns without confusion
+
+#### 5. Holographic Positioning (v5.0)
+GPS-less positioning:
+- Infers train position from next stop arrival times
+- Works when VehiclePosition data is unavailable
+- Uses `stops.txt` to convert stop_id to coordinates
+- Creates "ghost trains" from TripUpdate alone
 
 ## 🔧 Configuration
 
@@ -273,8 +333,9 @@ Confidential - National Railway Surveillance Program
 
 ---
 
-**Version**: 5.0.0  
+**Version**: 6.0.0  
 **Status**: ✅ Production Ready  
 **Architecture**: État de l'Art (State of the Art)  
+**New in v6.0**: Rail-Lock spatial awareness with automated data preparation
 
 🚂 *"From Theory to Industrial Reality"*

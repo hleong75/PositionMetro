@@ -110,6 +110,10 @@ class PanoptiqueFerroviaire:
             'fusion': {
                 'simulation_rate': 1.0
             },
+            'static_data': {
+                'topology_path': 'data/topology.json',
+                'stops_path': 'data/stops.txt'
+            },
             'logging': {
                 'level': 'INFO'
             },
@@ -205,10 +209,37 @@ class PanoptiqueFerroviaire:
         
         kafka_config = self.config.get('kafka', {})
         
+        # Get static data file paths from config or use defaults
+        static_data_config = self.config.get('static_data', {})
+        topology_path = static_data_config.get('topology_path', 'data/topology.json')
+        stops_path = static_data_config.get('stops_path', 'data/stops.txt')
+        
+        # Check existence of static data files
+        if not os.path.exists(topology_path):
+            self.logger.warning(
+                "topology_file_missing",
+                path=topology_path,
+                message=f"Topology file not found at {topology_path}. "
+                        "Rail-Lock spatial awareness will operate in degraded mode. "
+                        "Run 'python -m src.tools.prepare_data' to generate static data files."
+            )
+        
+        if not os.path.exists(stops_path):
+            self.logger.warning(
+                "stops_file_missing",
+                path=stops_path,
+                message=f"Stops file not found at {stops_path}. "
+                        "Holographic Positioning will operate in degraded mode. "
+                        "Run 'python -m src.tools.prepare_data' to generate static data files."
+            )
+        
+        # Initialize fusion engine with topology and stops paths
         self.fusion_engine = HybridFusionEngine(
             kafka_bootstrap_servers=kafka_config.get('bootstrap_servers', 'localhost:9092'),
             kafka_topic=kafka_config.get('topic_raw_telemetry', 'raw_telemetry'),
-            kafka_group_id=kafka_config.get('consumer_group_id', 'neural_engine')
+            kafka_group_id=kafka_config.get('consumer_group_id', 'neural_engine'),
+            topology_path=topology_path if os.path.exists(topology_path) else None,
+            stops_path=stops_path if os.path.exists(stops_path) else None
         )
         
         await self.fusion_engine.start()
