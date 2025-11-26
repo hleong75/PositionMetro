@@ -341,9 +341,9 @@ class OmniscienceEngine:
         """Get a specific operator by ID."""
         return self._operators.get(org_id)
         
-    def get_all_operators(self) -> List[TransportOperator]:
-        """Get all discovered operators."""
-        return list(self._operators.values())
+    def get_all_operators(self) -> Dict[str, TransportOperator]:
+        """Get all discovered operators as a dictionary mapping org_id to operator."""
+        return self._operators.copy()
         
     def get_all_resources(self) -> List[GTFSRTResource]:
         """Get all discovered GTFS-RT resources across all operators."""
@@ -351,6 +351,66 @@ class OmniscienceEngine:
         for operator in self._operators.values():
             resources.extend(operator.resources)
         return resources
+
+    async def discover_feeds_limited(self, max_pages: int = 5) -> Dict[str, TransportOperator]:
+        """
+        Discover feeds with a page limit for faster startup.
+        
+        This is useful for standalone mode or testing where you don't want
+        to scan all pages of the API.
+        
+        Args:
+            max_pages: Maximum number of pages to scan.
+            
+        Returns:
+            Dictionary mapping organization IDs to TransportOperator objects.
+        """
+        logger.info(
+            "omniscience_limited_discovery_started",
+            base_url=self.BASE_API_URL,
+            max_pages=max_pages
+        )
+        
+        page = 1
+        total_resources = 0
+        
+        while page <= max_pages:
+            try:
+                resources_found = await self._fetch_page(page)
+                
+                if resources_found == 0:
+                    # No more results, we've reached the end
+                    break
+                    
+                total_resources += resources_found
+                logger.debug(
+                    "omniscience_page_processed",
+                    page=page,
+                    resources_on_page=resources_found,
+                    total_resources=total_resources
+                )
+                
+                page += 1
+                
+            except Exception as e:
+                logger.error(
+                    "omniscience_page_error",
+                    page=page,
+                    error=str(e)
+                )
+                page += 1
+                continue
+                
+        logger.info(
+            "omniscience_limited_discovery_completed",
+            total_operators=len(self._operators),
+            total_resources=total_resources,
+            pages_scanned=page - 1,
+            max_pages=max_pages
+        )
+        
+        # Return a copy for consistency with get_all_operators()
+        return self._operators.copy()
 
 
 async def main() -> None:

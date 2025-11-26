@@ -1,9 +1,15 @@
-# Panoptique Ferroviaire - HNPS v5.0 Configuration
+# Panoptique Ferroviaire - HNPS v6.0 Configuration
+# 
+# Ce fichier configure toutes les options du système.
+# Modes d'exécution:
+#   - Mode Docker: docker-compose up -d && python main.py
+#   - Mode Autonome: python main_standalone.py
+#
 
 # Application Metadata
 application:
   name: "Panoptique Ferroviaire"
-  version: "5.0.0"
+  version: "6.0.0"
   description: "Hybrid Neuro-Physical System for Railway Surveillance"
 
 # Kafka Configuration
@@ -105,3 +111,21 @@ features:
   moving_block_enforcement: true
   predictive_analytics: false  # Future feature
   neural_network_fusion: false  # Future feature
+
+# Static Data Paths (pour Rail-Lock et Holographic Positioning)
+# Ces fichiers sont générés par: python -m src.tools.prepare_data
+static_data:
+  topology_path: "${TOPOLOGY_PATH:data/topology.json}"
+  stops_path: "${STOPS_PATH:data/stops.txt}"
+
+# Standalone Mode Configuration (pour main_standalone.py)
+# Utilisé uniquement en mode autonome sans Docker/Kafka/PostgreSQL
+standalone:
+  # Nombre maximal de pages à scanner lors de la découverte (limite la mémoire)
+  max_discovery_pages: ${STANDALONE_MAX_DISCOVERY_PAGES:5}
+  # Intervalle d'affichage du statut en secondes
+  status_interval: ${STANDALONE_STATUS_INTERVAL:30}
+  # Nombre maximal de ressources à récolter simultanément
+  max_resources: 20
+  # Taille maximale du buffer de messages en mémoire
+  max_messages: 10000
