@@ -291,11 +291,13 @@ class PanoptiqueStandalone:
             print(f"   ✓ Stops chargés: {stops_path}")
         
         # Initialize fusion engine without Kafka connection
-        # We pass a dummy Kafka address that won't be used in standalone mode
+        # Note: The constructors require Kafka parameters, but in standalone mode
+        # they are ignored since we don't call start() which connects to Kafka.
+        # We use initialize_standalone_mode() instead.
         self.fusion_engine = HybridFusionEngine(
-            kafka_bootstrap_servers="standalone:9092",  # Not used in standalone mode
-            kafka_topic="standalone_topic",
-            kafka_group_id="standalone_group",
+            kafka_bootstrap_servers="standalone-mode",  # Not used - standalone mode
+            kafka_topic="standalone_topic",             # Not used - standalone mode
+            kafka_group_id="standalone_group",          # Not used - standalone mode
             topology_path=topology_path if os.path.exists(topology_path) else None,
             stops_path=stops_path if os.path.exists(stops_path) else None
         )
@@ -322,9 +324,12 @@ class PanoptiqueStandalone:
         harvester_config = self.config.get('harvester', {})
         
         # Create harvester without Kafka
+        # Note: The constructor requires Kafka parameters, but in standalone mode
+        # they are ignored since we use start_standalone() instead of start()
+        # which doesn't connect to Kafka.
         self.harvester = GTFSRTHarvester(
-            kafka_bootstrap_servers="standalone:9092",  # Not used in standalone mode
-            kafka_topic="standalone_topic",
+            kafka_bootstrap_servers="standalone-mode",  # Not used - standalone mode
+            kafka_topic="standalone_topic",             # Not used - standalone mode
             on_metrics=self._on_harvest_metrics
         )
         
@@ -387,13 +392,22 @@ class PanoptiqueStandalone:
             await asyncio.sleep(sleep_time)
             
     async def _harvest_and_process(self, resource: GTFSRTResource) -> bool:
-        """Harvest a resource and process it directly (bypass Kafka)."""
+        """
+        Harvest a resource and process it directly (bypass Kafka).
+        
+        Note: In standalone mode, we currently only harvest and collect metrics.
+        The fusion engine runs independently using its simulation loop.
+        To fully integrate harvested data with the fusion engine, you would need to:
+        1. Parse the GTFS-RT Protocol Buffer data
+        2. Call self.fusion_engine.process_message() with the parsed data
+        This is left as a future enhancement for the standalone mode.
+        """
         try:
             metrics = await self.harvester.harvest_resource(resource)
             
             if metrics.status == FeedStatus.ACTIVE:
-                # In full mode, data would go to Kafka and be consumed by fusion engine
-                # In standalone mode, we could process directly here if needed
+                # Metrics collected and callback invoked via on_metrics
+                # Data stored in self.data_store via _on_harvest_metrics
                 return True
             return False
         except Exception as e:

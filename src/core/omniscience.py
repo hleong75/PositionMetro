@@ -409,7 +409,8 @@ class OmniscienceEngine:
             max_pages=max_pages
         )
         
-        return self._operators
+        # Return a copy for consistency with get_all_operators()
+        return self._operators.copy()
 
 
 async def main() -> None:
